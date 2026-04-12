@@ -131,7 +131,7 @@ class DTUScene(DatasetAdapter):
             raise IndexError(f"Image index {idx} out of range [0, {self.n_images})")
         img = cv2.imread(str(self._image_paths[idx]))
         if img is None:
-            raise IOError(f"Failed to load image: {self._image_paths[idx]}")
+            raise OSError(f"Failed to load image: {self._image_paths[idx]}")
         return img
 
     def get_image_path(self, idx: int) -> Path:
@@ -221,7 +221,7 @@ class DTUScene(DatasetAdapter):
             DEPTH_MIN DEPTH_INTERVAL
         """
         with open(path) as f:
-            lines = [l.strip() for l in f.readlines() if l.strip()]
+            lines = [line.strip() for line in f.readlines() if line.strip()]
 
         # Find extrinsic block (4x4 matrix after "extrinsic" header)
         ext_start = None
@@ -279,7 +279,7 @@ class DTUScene(DatasetAdapter):
 
         return {"K": K, "extrinsics": extrinsics, "P": P}
 
-    def subsample(self, n_views: int, seed: int = 42) -> "DTUScene":
+    def subsample(self, n_views: int, seed: int = 42) -> DTUScene:
         """Create a new DTUScene with a deterministic subset of views.
 
         Views are evenly spaced across the original sequence with a
