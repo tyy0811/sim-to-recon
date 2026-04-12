@@ -1,0 +1,12 @@
+# View count stress sweep configuration
+# Tests reconstruction quality degradation as input views decrease.
+
+stress:
+  type: view_count
+  view_counts: [49, 30, 15, 8]
+  seed: 42
+  scene: dtu_scan9
+
+evaluation:
+  chamfer_threshold: 2.0   # mm
+  f_score_threshold: 1.0   # mm

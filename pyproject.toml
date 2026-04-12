@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "simtorecon"
+version = "0.1.0"
+description = "Multi-view 3D reconstruction benchmark with stress-tested honest evaluation"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "open3d>=0.17.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+pipeline = [
+    "pycolmap>=0.6.1",
+    "opencv-python>=4.8",
+]
+dev = [
+    "simtorecon[pipeline]",
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "ruff>=0.4.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["N803", "N806"]  # Allow uppercase variable names for math notation (K, R, P)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "smoke: smoke tests that run a small reconstruction",
+]

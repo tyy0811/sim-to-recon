@@ -1,0 +1,38 @@
+# Data and results (large, generated). Anchored with leading slash so we
+# don't accidentally match src/simtorecon/data/ which is a source module.
+/data/
+/results/
+
+# Build artifacts
+build/
+*.o
+*.so
+*.dylib
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Figures committed to repo — they are referenced in README and are part of
+# the V1 deliverable. Regenerate with `make figures` after a new sweep.
+
+# Coverage
+.coverage
+htmlcov/
+
+# Environment
+.env

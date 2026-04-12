@@ -1,0 +1,20 @@
+# DTU scan9 — well-textured stone figure
+# 49 images at 1600x1200 (rectified), ground truth point cloud available.
+# Chosen for V1: small, well-calibrated, clean GT, CPU-friendly at 800x600.
+
+scene:
+  name: dtu_scan9
+  root: data/dtu/scan9
+  scan_id: 9
+  light_idx: 3  # lighting condition (3 = ambient)
+
+pipeline:
+  target_width: 800
+  target_height: 600
+  max_image_size: 800
+  patch_size: 11
+  num_iterations: 5
+  geom_consistency: true
+  min_num_pixels: 5
+  max_reproj_error: 2.0
+  max_depth_error: 0.01
