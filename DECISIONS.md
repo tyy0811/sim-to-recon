@@ -426,3 +426,167 @@ The `rect_028` view at 15.90 dB is the same "hardest view" outlier that Day 9's 
 - *Set `densify_stop_iter < densify_start_iter` as a guard pattern.* Rejected because gsplat's `DefaultStrategy.__init__` may sanity-check this and raise, blocking the substitute before it can be tested. The 999999-on-all-three approach is the least clever and least likely to trip an unknown validator.
 
 **Honest scope of the claim:** the mechanism substitution is validated by the verification run's PSNR matching DECISIONS 21 row 1 within seed noise. It is NOT validated against the *bit-level* intermediate gradient trajectory of Day 8's bug-induced run. Final state (N=9044, final PSNR ≈ 22.62 dB) is what is claimed to be preserved; intermediate state during training (grad accumulators in `strategy_state`, CUDA RNG consumption count) differs. A reviewer who wants to know "does the clean substitute produce identical intermediate optimizer states" gets the honest answer: "no, and it doesn't need to — what we report is final novel-view metrics, not intermediate training trajectories, and the verification run gates on the final-metric equivalence."
+
+---
+
+## 25. Day 10 multi-seed sweep reframes frozen and over-dens as 3-seed distributions — DECISIONS 23 anchoring falsified, DECISIONS 20 variance-source list incomplete
+
+**Decision:** Supersede DECISIONS 21 row 1 and row 2 as the canonical recipe characterizations for downstream work. The frozen and over-dens recipes are now characterized by the 3-seed distributions from Day 10's multi-seed sweep (seeds {42, 123, 7}, commit `acf2e1b`), not by DECISIONS 21's single-seed-42 point estimates. DECISIONS 21 and DECISIONS 23 are preserved as pre-commit records without retroactive edit; this entry documents what the observed data forced us to update, and names two distinct pre-commit gaps that the sweep and the P2 diagnostic surfaced.
+
+---
+
+**Gap 1 — DECISIONS 23's anchoring failure (quantitative).**
+
+DECISIONS 23 pre-committed the frozen-recipe PSNR success band as "22.3 – 23.0 dB (±0.4 dB of DECISIONS 21 row 1 anchor 22.62)" under the implicit assumption that seed-to-seed variance would be ≲1 dB. Both parts of that assumption were falsified by observation:
+
+- The anchor was a single-seed-42 datapoint from Day 9 (DECISIONS 21 row 1), not a multi-seed median. Anchoring a multi-seed success band to a single-seed point estimate was a methodological error made before any seed-variance data existed for this recipe at this scene+view-count combination.
+- The actual 3-seed range is **1.53 dB** (22.56 at seed=42 down to 21.03 at seed=123), and the median-of-medians is **21.32 dB** — 0.48 dB below DECISIONS 23's "defensible floor" of 21.8 dB and fully outside the 22.3–23.0 success band.
+
+The over-dens success band (18.8–19.5 dB) was also falsified: median-of-medians 18.50 dB (below the band, above the 18.3 dB floor) and seed-to-seed range 3.19 dB (above the 2.0 dB "notable" threshold → a finding on its own per DECISIONS 23's seed-range trigger). N_final band (850k–1.25M) held — all three seeds landed between 1.09M and 1.13M.
+
+This is a methodology lesson about pre-commit *quality*, not about either recipe's mechanism. A single-seed point estimate is the wrong kind of anchor for a multi-seed success band, and the ≲1 dB noise assumption was not grounded in any prior data for this regime. DECISIONS 25's corrected characterization uses the distribution itself as the record, with no external anchor.
+
+**Gap 2 — DECISIONS 20's structural failure (qualitative).**
+
+DECISIONS 20 pre-committed the posture for what V1.5's multi-seed variance would measure. It named two sources: (a) gsplat's split/duplicate sampling paths diverging from step 600 onward under different torch RNG seeds, and (b) rasterizer atomic-add ordering non-determinism. It did NOT name a third source that turns out to dominate on the frozen recipe: (c) per-step training-image sampler permutation via `np.random.default_rng(seed)` at the line that draws the next image each iteration.
+
+For the frozen recipe, source (a) is structurally unreachable (no refinement events fire), source (b) is at the noise floor (<0.03 dB as demonstrated by the P2 diagnostic's torch-seed isolation below), and source (c) is ~1.5 dB — the entire observed seed range. The "what multi-seed variance will measure" paragraph in DECISIONS 20 is incomplete not because its named sources were wrong but because it missed the third source entirely. This is a different kind of pre-commit failure than Gap 1 — structural (which sources were worth naming) rather than quantitative (how wide the band should be).
+
+Both gaps are documented here because variance-as-contribution is the load-bearing V1 → V1.5 narrative, and folding either failure silently into the DECISIONS 25 mechanism citation would undo exactly the pre-commit discipline the variance posture was supposed to enforce. Future multi-seed posture declarations in this repo should name all per-step sampling streams as first-class variance sources, not just torch-seed-driven sources. Generalized memory entry will be added on DECISIONS 25 commit.
+
+---
+
+**Corrected characterization — 3-seed distributions**
+
+**Frozen recipe** (L1-only, `densify_start_iter = densify_stop_iter = reset_opacity_iter = 999999`, see DECISIONS 24), seeds {42, 123, 7}, 7000 iterations, 4 held-out views:
+
+| Seed | PSNR median | SSIM | LPIPS | N_final |
+|---|---|---|---|---|
+| 42 | 22.56 dB | 0.816 | 0.187 | 9,044 |
+| 123 | 21.03 dB | 0.808 | 0.200 | 9,044 |
+| 7 | 21.32 dB | 0.813 | 0.194 | 9,044 |
+
+- Median-of-medians: **21.32 dB**
+- Seed-to-seed range: **1.53 dB** (22.56 − 21.03)
+- N_final: 9,044 across all three seeds (hard constraint, mechanism preserves initial point count)
+
+**Over-dens recipe** (L1 + 0.2·SSIM, `grow_grad2d = 2e-4`, gsplat `DefaultStrategy` defaults), seeds {42, 123, 7}, 7000 iterations, 4 held-out views:
+
+| Seed | PSNR median | SSIM | LPIPS | N_final |
+|---|---|---|---|---|
+| 42 | 18.90 dB | 0.884 | 0.087 | 1,093,077 |
+| 123 | 15.71 dB | 0.864 | 0.120 | 1,129,574 |
+| 7 | 18.50 dB | 0.894 | 0.084 | 1,107,423 |
+
+- Median-of-medians: **18.50 dB**
+- Seed-to-seed range: **3.19 dB** (18.90 − 15.71)
+- N_final distribution: [1.09M, 1.13M, 1.11M], ±3% across seeds — growth dynamics are stable, variance is not in how many Gaussians we end up with but in where they go.
+
+DECISIONS 21 row 1's 22.62 dB and row 2's 19.17 dB are single samples from these distributions, measured at seed=42 before any variance structure was characterized. Seed=42 is (coincidentally, given it was chosen in Day 8 before any seed-variance data existed) the *high* outlier of the 3-seed distribution on both recipes: +1.24 dB above the median-of-medians on frozen, +0.40 dB above on over-dens. **Seed=42's high-outlier status was not known at Day 9 and does not constitute post-hoc selection bias: the seed was chosen as V1's stress-sweep lead (DECISIONS 16) before any V1.5 seed-variance data existed.** This is a historical footnote, not a cherry-picking finding, and Day 9's single-seed ablation framing stands unchanged.
+
+---
+
+**Frozen-recipe mechanism — P2 diagnostic, Band α with quantitative surplus**
+
+The P2 diagnostic (run immediately after the sweep, same day, pre-committed against three bands in `preflight/2026-04-14_day10_p2_diagnostic.txt`) was designed to test whether the per-step training-image sampler drives the frozen recipe's observed seed range. Protocol: two Modal runs on the frozen recipe with `torch.manual_seed(42)` held constant and only `image_order_seed` (a new optional parameter added to `train_gsplat`, see DECISIONS 25 commit diff on `modal_app.py`) varied between 42 and 123.
+
+| | Run A | Run B |
+|---|---|---|
+| torch seed (manual + cuda + np.random legacy) | 42 | 42 |
+| image_order_seed (drives `np.random.default_rng`) | 42 | 123 |
+| PSNR median | **22.5623 dB** | **21.0570 dB** |
+| SSIM median | 0.8158 | 0.8082 |
+| LPIPS median | 0.1872 | 0.1996 |
+| N_final | 9,044 | 9,044 |
+| elapsed | 156.2 s (cold) | 69.8 s (warm) |
+
+**|ΔPSNR(B − A)| = 1.5053 dB.** Pre-committed bands: α > 0.5 dB (image-order dominant), γ 0.2–0.5 dB (partial), β < 0.2 dB (not image-order). Observed ΔPSNR lands cleanly in **Band α**. The 1.5053 dB delta is also effectively equal to the 3-seed sweep range of 1.53 dB across {42, 123, 7} — image-order permutation alone reproduces the entire observed spread.
+
+**Two-sided quantitative confirmation (result exceeds the pre-committed Band α claim):**
+
+1. **Run A ≡ sweep-frozen_s42.** Run A's 22.5623 dB compared against sweep-frozen_s42's 22.5625 dB is a |Δ| of **0.0002 dB**. This validates the code change (the `image_order_seed=None → seed` fallback is bit-identical to the pre-change path) AND confirms that at torch seed=42 and image_order seed=42, the torch-seed component and code-path component of variance are both at the floating-point-rounding floor.
+2. **Run B ≡ sweep-frozen_s123.** Run B's 21.0570 dB compared against sweep-frozen_s123's 21.0297 dB (torch seed=123 via legacy single-seed path, image_order=123) is a |Δ| of **0.027 dB**. Only 0.027 dB separates a run where torch seed is 42 from a run where torch seed is 123 — when image_order is held at 123 in both cases.
+
+Reading both sides together: **of the 1.53 dB observed frozen seed range, the torch-seed component is <0.03 dB and the image-order component is ~1.5 dB.** Image order isn't just the dominant driver the diagnostic was pre-committed to test — it's effectively the *sole* driver at the 4-view PSNR resolution being measured. This result exceeds the pre-committed Band α claim and is flagged explicitly here rather than folded silently into the mechanism citation: the diagnostic was set up to test "dominant driver" (|Δ| > 0.5 threshold) and returned |Δ| ≈ 1.5 dB — a result that accounts for the entire 1.53 dB 3-seed sweep range within the invocation-noise floor.
+
+**Mechanism interpretation:** at 7000 iterations over 33 training images with ~212 visits per image on average, different per-step image-order permutations drive the 9044-Gaussian optimizer to different local minima in the radiance-field parameter space. The fixed-capacity model cannot average out the permutation effect the way a higher-capacity model might. Each permutation biases the optimizer's step-by-step visit pattern, and different biases produce different fits on the same fixed Gaussian cloud. This is consistent with the published literature on optimizer-path dependence in stochastic-gradient training but has not, to the best of this repo's lit search, been directly reported as a dominant seed-variance source on frozen-init 3DGS at sparse-init scale.
+
+---
+
+**Over-dens-recipe mechanism — partial, multi-source, qualitative frame finding**
+
+The P2 diagnostic was run on the frozen recipe only. Over-dens variance has multiple live stochasticity sources: (a) gsplat split/duplicate sampling (live — refinement fires as designed, N grows to ~1.1M), (b) rasterizer atomic-add ordering (live, always is), (c) per-step training-image sampler (live, same code path as frozen). Their relative contributions for the over-dens recipe are NOT isolated in this phase. An analogous P2-style diagnostic (vary `image_order_seed`, hold torch seed) on over-dens would cost ~$0.10 and would answer the image-order question for this recipe; it is deferred to Day 13 as a contingency rather than pursued here, because the V1.5 timeline is tight and the qualitative frame inspection below is sufficient to characterize the variance at a defensible level for the Day 12 cross-method writeup.
+
+**Frame-inspection result (P1 sub-step, parallel to DECISIONS 25 drafting, frames already downloaded by the sweep):**
+
+Compared over_dens_s42 and over_dens_s123 rendered PNGs at the held-out views. Per-view PSNR breakdown across the three over-dens seeds:
+
+| View | s42 | s123 | s7 | s123 vs s42 |
+|---|---|---|---|---|
+| rect_001 | 21.76 | 15.77 | 23.25 | −5.99 dB |
+| rect_014 | 16.53 | **18.67** | 16.58 | **+2.14 dB (s123 wins)** |
+| rect_028 | 19.51 | 15.64 | 17.88 | −3.87 dB |
+| rect_041 | 18.29 | 14.34 | 19.12 | −3.95 dB |
+
+The per-view PSNR crossing on `rect_014` (s123 beats both s42 and s7 by ~2 dB on this view, while losing the other three views by 4–6 dB) **rules out mode collapse as the failure mechanism**. A collapsed reconstruction would uniformly lose every view, not flip the ordering on one specific view. Visual inspection of the PNGs at rect_001 and rect_014 confirms: both s42 and s123 render the DTU scan9 miniature building model with comparable foreground geometry, building edges, and color fidelity. The material difference is in the **off-surface floater distribution** — dark speckle noise scattered across the white background regions. s123 has denser floater speckle than s42 in the `rect_001` background (hurting that view) but less floater speckle in the `rect_014` background below the buildings (helping that view).
+
+**Mechanism interpretation for over-dens variance:** at 1.07M total Gaussians, the model has enough capacity to cover the foreground scene and still have excess Gaussians that settle into off-surface floater positions. Different image-order permutations (plus possibly different split/duplicate sampling paths, which are not isolated in this phase) drive the ~1M-scale Gaussian cloud to different local minima where the *floater distribution in 3D space differs across seeds*. Each held-out view's PSNR depends on whether its line of sight passes through a sparse or dense floater region. This manifests as the per-view PSNR crossings observed above, and it extends DECISIONS 21's Day 9 mechanism claim ("the over-parameterized model produces sub-pixel noise that doesn't hurt SSIM/LPIPS and drives PSNR below the frozen baseline") with a secondary finding: *the sub-pixel noise is not uniformly distributed across views; its per-view intensity is seed-dependent and can swing PSNR by ~6 dB on a single view across otherwise-comparable reconstructions.*
+
+Caveat on SSIM/LPIPS: over_dens_s123 (0.864 / 0.120) is slightly worse than s42 (0.884 / 0.087) and s7 (0.894 / 0.084) across the median — not only on PSNR. So the s123 result is not purely "same reconstruction, floaters moved around without affecting perceptual metrics." It is a *slightly* worse reconstruction in feature-space metrics AND a floater-redistribution PSNR pattern. The floater story is the dominant per-view narrative but not the entire story. A full decomposition (image-order vs refinement-sampling, plus per-seed perceptual-metric drift) would require the deferred over-dens P2 diagnostic.
+
+---
+
+**Preservation of DECISIONS 20, 21, 23 as pre-commit records**
+
+Neither DECISIONS 20 nor 21 nor 23 is edited retroactively. All three stand as pre-commit records of the methodology that produced the Day 10 findings:
+
+- **DECISIONS 20** reports the pre-committed RNG posture and variance-source list. Source (c) is missing. DECISIONS 25 identifies the gap; DECISIONS 20 is preserved unchanged.
+- **DECISIONS 21** reports the four-row densification ablation at seed=42 single-seed. Its numbers are correct at that seed; they're single samples from distributions Day 10 now characterizes. DECISIONS 21's Day 9 contribution framing stands.
+- **DECISIONS 23** reports the pre-committed multi-seed sweep scope, seeds, and success bands. The bands were falsified by observation; that falsification is itself the finding DECISIONS 25 documents, and rewriting DECISIONS 23 post-hoc would undo exactly the pre-commit discipline it was designed to enforce.
+- **DECISIONS 24** is unchanged by DECISIONS 25 — in fact, the Day 10 sweep *validates* the DECISIONS 24 mechanism-substitution claim a second time beyond the original verification run. Against DECISIONS 21 row 1's 22.62 dB anchor, both seed=42 reproductions pass DECISIONS 24's pre-committed ±0.5 dB band: the verification run landed at 22.59 dB (|Δ|=0.03 dB), and the sweep-frozen_s42 run landed at 22.56 dB (|Δ|=0.06 dB). The P2 Run A at 22.5623 dB provides a third independent seed=42 datapoint matching sweep-frozen_s42 to 0.0002 dB. **No revision to DECISIONS 24 is needed.** DECISIONS 25 adds context about the 3-seed distribution but does not weaken DECISIONS 24's seed=42 mechanism claim: at that seed the mechanism substitute and the bug's final state are indistinguishable at the floating-point-rounding floor; seed=42 itself is just the high outlier of a ~1.5 dB distribution we now know about.
+
+Editing pre-commits after they're falsified is the failure mode the entire pre-commit discipline is designed to prevent. Keep them; document the falsification here.
+
+Footnote pointers from DECISIONS 20/21/23 to DECISIONS 25 will be added at README edit time (Day 13), not now — the footnotes are a presentation-layer concern, not a DECISIONS.md edit.
+
+---
+
+**Implications for downstream work**
+
+1. **V1.5 README, when written (Day 13 per plan):** lead with the 3-seed distributions, not DECISIONS 21's single-point rows. The four-row ablation table remains in the README as single-seed ablation context (its Day 9 methodological role), but the frozen and over-dens recipes' *headline numbers* for the cross-method comparison are median-of-medians and 3-seed range, sourced from DECISIONS 25. The variance source is labeled explicitly per `feedback_variance_labeling.md`: view-to-view within a run vs seed-to-seed across runs are not the same quantity.
+
+2. **Day 12 cross-method comparison table:** uses 3-seed distributions for both 3DGS rows. DECISIONS 23's "two recipes = two rows in Day 12's table" framing holds; each row reports median+range from DECISIONS 25 rather than DECISIONS 21's single points. Day 12 also needs to decide whether to footnote the over-dens per-view PSNR crossings or fold them into the table narrative — a presentation call to make when drafting, not now.
+
+3. **Seed=42 as high outlier on both recipes:** supplementary observation only. Day 9's choice of seed=42 predates any seed-variance data and is not re-cast as cherry-picking. The methodological mitigation is that subsequent phases report distributions rather than point estimates — DECISIONS 16 already established this for V1 and DECISIONS 25 extends it to V1.5.
+
+4. **Over-dens variance decomposition:** Day 13 contingency. If the Day 12 / Day 13 narrative needs the over-dens mechanism fully characterized (image-order vs refinement-sampling split, plus per-seed perceptual-metric drift), run an analogous P2-style diagnostic at ~$0.10. If the README is satisfied with the frame-inspection qualitative finding and the "multiple live sources, dominant mechanism unidentified" honest framing, skip it. This is a decision to make when drafting the README, not now.
+
+5. **DECISIONS 20 generalized lesson:** future multi-seed posture declarations in this repo (or any future repo touched from this codebase) should name all per-step sampling streams as first-class variance sources, not just torch-seed-driven sources. The `np.random.default_rng(seed)` per-step training-image sampler was a third variance source that DECISIONS 20 missed; any future pre-commit that lists "what multi-seed variance will measure" should explicitly enumerate every RNG stream the training loop consumes. A memory entry `feedback_rng_stream_enumeration.md` will be added on the DECISIONS 25 commit.
+
+---
+
+**Cost accounting**
+
+| Phase | Cost |
+|---|---|
+| V1 total | ~$5.00 |
+| V1.5 Day 8 | ~$0.30 |
+| V1.5 Day 9 | ~$0.35 |
+| V1.5 Day 10 smoke + verification | ~$0.22 |
+| V1.5 Day 10 sweep (6 runs) | ~$1.09 |
+| V1.5 Day 10 P2 diagnostic (2 runs) | ~$0.10 |
+| **V1.5 running total** | **~$2.06 of $50 cap** |
+
+Day 10 total ≈ $1.41, well under the spec's $50 cap and well under the original V1.5 Day-8–14 phase budget estimate.
+
+**Planned vs actual:** the post-Day-9 plan doc estimated Day 10 multi-seed at ~$0.30. Actual spend was ~$1.41 — a **4.7× overrun**. The overrun reflects the cost of verification + reproducibility checks + the P2 diagnostic triggered by the DECISIONS 23 band violation, NOT a multi-seed-per-se cost blowout. The 6-run sweep alone was $1.09, in line with naive multi-seed scaling from Day 8's ~$0.30-per-run estimate. The extra $0.32 is the discipline tax: verification gate ($0.17), smoke ($0.05), P2 diagnostic ($0.10). Future days' budgets should expect similar multipliers on top of naive run-count × per-run estimates if verification and diagnostic discipline are followed as written. The rate-limiter on Day 11+ is user review time and writeup discipline, not Modal compute.
+
+---
+
+**Honest scope of the claims in DECISIONS 25:**
+
+- The frozen-recipe image-order-dominant mechanism claim is empirically validated at torch seed=42 by the P2 diagnostic's two-sided confirmation (Run A ≡ sweep-frozen_s42 at 0.0002 dB; Run B ≡ sweep-frozen_s123 at 0.027 dB). It has NOT been independently verified at torch seeds 123 or 7 — the diagnostic only ran two image_order values at one torch seed. Extending the isolation across all three torch seeds would be a ~$0.30 additional diagnostic not pursued in this phase. The claim is strong but not exhaustive; a reviewer who asks "does the image-order-dominant mechanism hold at non-42 torch seeds?" gets the honest answer "we didn't test, but the two-sided confirmation at seed=42 is as strong as a two-seed diagnostic can produce."
+- The over-dens floater-distribution mechanism claim is based on frame inspection at seeds 42 and 123 only, at two of the four held-out views (`rect_001` and `rect_014`). Seed 7's frames and the other two views were not visually inspected. The per-view PSNR crossing is verified from the JSON data across all seeds and views (table above). The claim is qualitative and informed by the crossing pattern plus the two inspected frame pairs; a full quantitative mechanism decomposition for over-dens variance is deferred to Day 13 contingency.
+- The DECISIONS 20 structural-gap claim (source (c) missing) is validated for the frozen recipe but not for over-dens. On over-dens, multiple sources are live and DECISIONS 25 does not claim (c) dominates — only that it contributes and is worth naming in any future pre-commit of this kind.
+
+All three claims are consistent with the V1 / V1.5 variance-as-contribution framing: name the mechanism to the strength the data supports, name the uncertainty where it doesn't, and let the reader judge.

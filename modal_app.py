@@ -876,6 +876,7 @@ def train_gsplat(
     sh_degree: int = 3,
     refine_every: int = 100,
     random_bkgd: bool = False,  # costs ~3 dB PSNR on DTU-style gray backgrounds; see DECISIONS 22. Opt-in for synthetic pure-black-bg datasets only.
+    image_order_seed: int | None = None,  # When set, drives np.random.default_rng (per-step training-image sampler) independently of `seed`. When None, falls back to `seed` — backward-compatible with all Day 8/9/10 runs. Added for DECISIONS 23 P2 image-order-variance diagnostic.
 ) -> dict:
     """Train 3D Gaussian Splatting on a V1 COLMAP reconstruction.
 
@@ -1206,7 +1207,7 @@ def train_gsplat(
 
     # --- Training loop ---
     print(f"[train_gsplat] starting {n_iterations} iterations")
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed if image_order_seed is None else image_order_seed)
 
     losses_log: list[float] = []
     for step in range(n_iterations):
