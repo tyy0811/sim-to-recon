@@ -875,7 +875,7 @@ def train_gsplat(
     test_every: int = 10,
     sh_degree: int = 3,
     refine_every: int = 100,
-    random_bkgd: bool = True,  # blend rendered colors with per-step random background during training
+    random_bkgd: bool = False,  # costs ~3 dB PSNR on DTU-style gray backgrounds; see DECISIONS 22. Opt-in for synthetic pure-black-bg datasets only.
 ) -> dict:
     """Train 3D Gaussian Splatting on a V1 COLMAP reconstruction.
 
