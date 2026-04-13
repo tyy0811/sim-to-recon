@@ -179,6 +179,90 @@ contribution under investigation. Background contamination was tested and
 ruled out (Decision 14): only 1.1% of reconstructed points lie outside the
 object region, moving chamfer by 1.2mm.
 
+## V1.5: 3DGS Densification Ablation
+
+Six recent sparse-view 3D Gaussian Splatting papers (FSGS, CoR-GS, SE-GS, AD-GS,
+InstantSplat, Opacity-Gradient Densification Control) attribute sparse-view 3DGS
+failure to "uncontrolled densification" and propose method-level corrections.
+**All compare their corrected method against vanilla 3DGS. None publish the
+direct ablation: what happens if you disable densification entirely?** We ran
+that experiment on DTU scan9 with 33 training views and 4 held-out novel views,
+using gsplat 1.5.3 initialized from V1's best COLMAP sparse model (9,044 points).
+
+| Config | Densification | Loss | Final N | PSNR median | SSIM | LPIPS |
+|---|---|---|---|---|---|---|
+| Frozen baseline | OFF | L1 only | 9,044 | **22.62** | 0.816 | 0.187 |
+| Over-densified | ON, grow_grad2d=2e-4 | L1+0.2·(1−SSIM) | 1,067,117 | 19.17 | **0.885** | **0.088** |
+| Under-densified | ON, grow_grad2d=5e-3 | L1+0.2·(1−SSIM) | 15,626 | 17.56 | 0.843 | 0.169 |
+| Under-densified L1-only | ON, grow_grad2d=5e-3 | L1 only | 9,990 | 16.23 | 0.729 | 0.270 |
+
+*PSNR ranges within each row report view-to-view variance across the 4 held-out
+views of a single training run. Seed-to-seed variance across multiple training
+runs is reported separately in Day 10's multi-seed results. The two variance
+sources are not equivalent — V1's variance scatter (above) measures hardware
+non-determinism under identical seeds; V1.5's seed-to-seed variance will measure
+training-loop stochasticity. They are not directly comparable as noise floors.*
+
+**The frozen baseline outperforms every densified configuration on PSNR.**
+Working densification is net-negative for pixel fidelity across all three
+densified recipes. The over-densified configuration is best on perceptual
+metrics (SSIM 0.885, LPIPS 0.088) but its 1M Gaussians at 2.2 per pixel produce
+sub-pixel noise that doesn't hurt feature-space metrics and drives PSNR below
+the frozen baseline by 3.45 dB. We verified the divergence is high-frequency
+noise rather than a brightness shift: per-channel mean and std of rendered RGB
+match GT to within 5 / 256 across all held-out views, but per-pixel RMSE is
+18–32 / 256. The under-densified configurations are worse than the frozen
+baseline on every metric.
+
+**Mechanism (current best hypothesis).** gsplat's `grow_grad2d=2e-4` default is
+calibrated against ~100k–200k-point sparse inits typical for Mip-NeRF360-scale
+SfM. Scan9's init at 9,044 points is roughly 15× sparser; per-Gaussian gradients
+are proportionally larger; the default threshold fires on **82% of Gaussians
+per refinement event** (verified: 7,446 of 9,044 at step 600) versus the
+calibration target of ~5–15%. Compounded over 44 refinement events from step
+600 to 4900, N grows to 1.07M. Raising the threshold to 5e-3 (25× the default)
+brings first-event growth to 8.82% — in the calibration band — but `prune_scale3d`
+cleanup at step 3000 collapses growth to zero and leaves an under-densified
+~15k model. Neither extreme works at this scene + view-count combination. See
+[`DECISIONS.md`](DECISIONS.md) entries 19–22 for the full debugging trace,
+including the gsplat plumbing fixes (the silent `packed=True` bug that hid
+densification entirely from Day 8 through mid-Day 9), the random-stream seeding
+posture, and the methodology lessons.
+
+**The contribution is the four-row table itself.** A single-line plumbing fix
+in gsplat's strategy call exposed a recipe–data interaction that the published
+sparse-view 3DGS literature does not directly test in the ~33-view regime
+sim-to-recon targets — neither "sparse" by the published convention of 3–12
+views, nor the ~150-view density gsplat's threshold defaults assume. The
+published literature's "vanilla vs improved method" comparison structure is not
+designed to surface this kind of result.
+
+**Side finding — random_bkgd costs ~3 dB PSNR on DTU.** A control experiment
+with `random_bkgd=True` (gsplat `simple_trainer.py`'s default for synthetic
+object-centric scenes) on the over-densified configuration dropped held-out
+PSNR by 2.93 dB at the same step count, with no change in densification growth
+rate. Nerfstudio PR #1441 reports up to 8 dB PSNR cost for `random_bkgd` on
+Blender's non-RGBA scenes; our 3 dB cost on DTU sits in the lower half of that
+range. Both stem from the same mechanism: `random_bkgd` assumes GT backgrounds
+≈ 0, and DTU's gray ~12% backgrounds inject per-step uniform noise into the
+L1 loss in background regions instead of removing a consistent signal. The
+magnitude difference between Blender and DTU is what the background-color
+delta predicts (DTU's gray is closer to the assumed-zero floor than Blender's
+non-RGBA backgrounds). Independent replication of PR #1441's claim on a new
+dataset regime. See DECISIONS.md entry 22.
+
+**Cross-method comparison vs V1's COLMAP** is the Day 12 work. The same 4
+held-out cameras the gsplat runs are scored against will be used to render
+V1's best COLMAP fused point cloud, and both will be scored on the same metrics
+against the same ground-truth frames. With V1.5's gsplat PSNR underperforming
+the spec target across all four densification configurations, the Day 12
+framing will NOT be "neural splatting beats classical MVS on novel-view
+synthesis." It will be "at this scene + view-count combination, neither method
+is in its happy regime, and the failure modes are different — classical dense
+MVS loses geometry; neural splatting either over-parameterizes (hurting PSNR
+while preserving perceptual metrics) or under-fits (hurting all metrics)
+depending on the densification threshold."
+
 ## C++ Calibration Module
 
 Standalone C++17 camera calibration binary using OpenCV:
@@ -256,10 +340,14 @@ why each was wrong.
 - **PatchMatch parameter sweep.** Does tuning `min_num_pixels`, `window_radius`,
   or `filter_min_ncc` move the floor? A cheap way to find out whether the bimodal
   failure is fundamental to default PatchMatch or an artifact of the defaults.
-- **3D Gaussian Splatting comparison.** 3DGS has different failure modes
-  (scale/density vs geometric accuracy). Same stress sweep on the same scene
-  with 3DGS would give a cross-method variance profile — does 3DGS also show
-  an unreliability floor, or does it fail differently?
+- **3D Gaussian Splatting comparison.** *(Partially executed in V1.5 Day 9 — see
+  the "V1.5: 3DGS Densification Ablation" section above.)* 3DGS has different
+  failure modes (scale/density vs geometric accuracy). The Day 9 four-row
+  ablation showed that working densification is net-negative for PSNR on
+  scan9's sparse init + 33-view regime, with the literature's "uncontrolled
+  densification" framing not directly tested by published methods. Day 10
+  extends to multi-seed reporting; Day 12 is the cross-method PSNR comparison
+  on the same held-out cameras.
 - **Conformal calibration of reconstruction quality.** Given the variance, a
   calibrated "at 95% confidence, n=X views will produce ≥Y fused points" bound
   would be more useful to practitioners than a point estimate. This is the

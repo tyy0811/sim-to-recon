@@ -1,4 +1,4 @@
-.PHONY: deploy data build baseline stress figures test lint clean all
+.PHONY: deploy data build baseline stress gsplat-baseline figures test lint clean all
 
 # ---- Modal deployment ----
 # One-time setup: deploys sfm_dtu_scan9 and dense_mvs_subset to Modal.
@@ -24,6 +24,12 @@ baseline:
 
 stress:
 	python experiments/run_stress_view_count.py --seeds 42,123,7
+
+# ---- V1.5 neural extension ----
+# Single-seed gsplat smoke run against V1's best COLMAP baseline.
+# Requires `make deploy` to have refreshed modal_app.py with train_gsplat.
+gsplat-baseline:
+	python experiments/run_gsplat.py --seed 42
 
 # ---- Figures ----
 figures:

@@ -23,6 +23,13 @@ pipeline = [
     "pycolmap>=0.6.1",
     "opencv-python>=4.8",
 ]
+# Local-side dependencies for V1.5 neural extension (gsplat, perceptual metrics).
+# gsplat itself is NOT in this list — it runs only on Modal GPU via modal_app.py.
+neural = [
+    "torch>=2.0",
+    "scikit-image>=0.22",
+    "lpips>=0.1.4",
+]
 dev = [
     "simtorecon[pipeline]",
     "pytest>=7.4",
@@ -39,7 +46,10 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP"]
-ignore = ["N803", "N806"]  # Allow uppercase variable names for math notation (K, R, P)
+# N803/N806: allow uppercase variable names for math notation (K, R, P).
+# N815: allow mixedCase attribute names like lr_shN (shN is the gsplat name for
+# high-order spherical-harmonic coefficients).
+ignore = ["N803", "N806", "N815"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

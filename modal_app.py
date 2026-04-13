@@ -797,3 +797,779 @@ def download_dtu_scan9() -> dict:
         print(f"  {k}: {v}")
 
     return results
+
+
+# ---- V1.5: 3D Gaussian Splatting training (gsplat) ----
+#
+# Runs gsplat on Modal A10G against the undistorted sparse model produced by
+# reconstruct_dtu_scan9 (V1). Given a colmap_run_id like "scan9_v49_s123_3d428b",
+# reads /workspace/{run_id}/dense/sparse and /workspace/{run_id}/dense/images,
+# trains a 3D Gaussian model, renders held-out test views, and writes outputs
+# under /workspace/gsplat_{run_id}_s{seed}/ on the same workspace volume.
+#
+# Day 8 is a single-seed smoke run. Day 9 calls this function with 3 seeds.
+#
+# The image uses nvidia/cuda:12.4.1-devel (not runtime) so nvcc is available
+# in case gsplat falls back to a source build on a torch/cuda combo without
+# a prebuilt wheel.
+
+gsplat_image = (
+    modal.Image.from_registry(
+        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
+        add_python="3.11",
+    )
+    .apt_install(
+        "libgl1-mesa-glx",
+        "libglib2.0-0",
+        "libgomp1",
+        "libsm6",
+        "libice6",
+        "git",
+        "build-essential",
+    )
+    # Single pip layer. The first deploy used two layers (torch first, then
+    # gsplat) and pip's second-layer resolver picked triton 2.0 from Modal's
+    # mirror, which force-downgraded torch to 2.0.1 — breaking numpy ABI.
+    # Collapsing into one layer with extra_index_url lets pip see cu124 torch
+    # and pypi gsplat simultaneously, and the explicit triton pin prevents
+    # the downgrade.
+    .pip_install(
+        "numpy==1.26.4",
+        "torch==2.4.1",
+        "torchvision==0.19.1",
+        "triton==3.0.0",
+        "gsplat",
+        "pycolmap-cuda12",
+        "scipy>=1.10",
+        "opencv-python-headless>=4.8",
+        "scikit-image>=0.22",
+        "lpips>=0.1.4",
+        "torchmetrics>=1.0",
+        "pillow>=10.0",
+        extra_index_url="https://download.pytorch.org/whl/cu124",
+    )
+)
+
+
+@app.function(
+    image=gsplat_image,
+    gpu="A10G",
+    timeout=3600,  # 1 hour — 7000 iters typically runs in 5-15 min
+    volumes={VOLUME_MOUNT: workspace_volume},
+)
+def train_gsplat(
+    colmap_run_id: str,
+    n_iterations: int = 7000,
+    seed: int = 42,
+    lr_means: float = 1.6e-4,
+    lr_scales: float = 5e-3,
+    lr_quats: float = 1e-3,
+    lr_opacities: float = 5e-2,
+    lr_sh0: float = 2.5e-3,
+    lr_shN: float = 1.25e-4,
+    ssim_lambda: float = 0.2,  # 0.8*L1 + 0.2*(1 - SSIM) — matches gsplat simple_trainer.py
+    densify_start_iter: int = 500,
+    densify_stop_iter: int = 5000,
+    densify_grad_threshold: float = 2e-4,  # gsplat default; works when random_bkgd is on
+    reset_opacity_iter: int = 3000,
+    test_every: int = 10,
+    sh_degree: int = 3,
+    refine_every: int = 100,
+    random_bkgd: bool = True,  # blend rendered colors with per-step random background during training
+) -> dict:
+    """Train 3D Gaussian Splatting on a V1 COLMAP reconstruction.
+
+    Loads the undistorted sparse model from /workspace/{colmap_run_id}/dense/
+    and trains Gaussians initialized from the sparse points. Holds out every
+    test_every-th image (sorted by name) as a novel-view test set. Computes
+    PSNR / SSIM / LPIPS on held-out views and saves rendered PNGs + a
+    checkpoint to /workspace/gsplat_{colmap_run_id}_s{seed}/.
+
+    Returns a dict matching simtorecon.neural.gsplat_trainer.GsplatResult.
+    """
+    import json
+    import math
+    import os
+    import time
+
+    import cv2
+    import numpy as np
+    import pycolmap
+    import torch
+    from torch import nn
+    from torch.nn.functional import l1_loss, normalize
+    from torchmetrics.functional.image import (
+        structural_similarity_index_measure as tm_ssim,
+    )
+
+    def math_ok(x: float) -> bool:
+        return not (math.isnan(x) or math.isinf(x))
+
+    start = time.time()
+
+    # RNG posture is pinned explicitly to make V1.5's multi-seed variance interpretable.
+    # See DECISIONS.md entry 20 for what is and isn't deterministic and why.
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    device = "cuda"
+
+    out_run_id = f"gsplat_{colmap_run_id}_s{seed}"
+    out_dir = f"{VOLUME_MOUNT}/{out_run_id}"
+    renders_dir = f"{out_dir}/renders"
+    os.makedirs(renders_dir, exist_ok=True)
+
+    def _fail(msg: str, **extra) -> dict:
+        print(f"[train_gsplat] FAILED: {msg}")
+        return {
+            "success": False,
+            "run_id": out_run_id,
+            "colmap_run_id": colmap_run_id,
+            "seed": seed,
+            "error": msg,
+            "elapsed_seconds": time.time() - start,
+            **extra,
+        }
+
+    # --- Locate the undistorted sparse model + images ---
+    # V1 writes: /workspace/{run_id}/dense/sparse  +  /workspace/{run_id}/dense/images
+    # (pycolmap.undistort_images writes flat 'sparse/' without the /0/ subdir).
+    base = f"{VOLUME_MOUNT}/{colmap_run_id}"
+    candidates = [
+        (f"{base}/dense/sparse", f"{base}/dense/images"),
+        (f"{base}/dense/sparse/0", f"{base}/dense/images"),
+        (f"{base}/sparse/0", f"{base}/images"),  # pre-undistort fallback
+    ]
+    sparse_path = None
+    images_path = None
+    for sp, ip in candidates:
+        has_cams = (
+            os.path.exists(f"{sp}/cameras.bin")
+            or os.path.exists(f"{sp}/cameras.txt")
+        )
+        if has_cams and os.path.isdir(ip):
+            sparse_path = sp
+            images_path = ip
+            break
+
+    if sparse_path is None:
+        return _fail(
+            f"no sparse model found under {base}/dense/sparse or fallbacks"
+        )
+
+    print(f"[train_gsplat] sparse: {sparse_path}")
+    print(f"[train_gsplat] images: {images_path}")
+
+    # --- Load COLMAP reconstruction ---
+    try:
+        recon = pycolmap.Reconstruction(sparse_path)
+    except Exception as e:
+        return _fail(f"pycolmap.Reconstruction failed: {e}")
+
+    n_recon_imgs = recon.num_reg_images()
+    n_sparse_pts = len(recon.points3D)
+    print(f"[train_gsplat] loaded {n_recon_imgs} images, {n_sparse_pts} sparse points")
+
+    if n_sparse_pts < 100:
+        return _fail(f"too few sparse points ({n_sparse_pts}) to initialize gsplat")
+
+    # --- Build per-image data (viewmat, K, RGB tensor) ---
+    images_info: list[dict] = []
+    for img in recon.images.values():
+        if not img.has_pose:
+            continue
+        cam = recon.cameras[img.camera_id]
+
+        # cam_from_world: world -> camera (gsplat viewmat convention).
+        # pycolmap-cuda12 exposes cam_from_world as a method, upstream pycolmap
+        # as an attribute — dispatch defensively.
+        cfw = img.cam_from_world
+        rigid = cfw() if callable(cfw) else cfw
+        # rigid.matrix() returns the (3, 4) world-to-cam transform.
+        _mat = rigid.matrix
+        W = np.asarray(_mat() if callable(_mat) else _mat, dtype=np.float32)
+        if W.shape == (3, 4):
+            viewmat = np.eye(4, dtype=np.float32)
+            viewmat[:3, :4] = W
+        elif W.shape == (4, 4):
+            viewmat = W.astype(np.float32)
+        else:
+            return _fail(
+                f"unexpected cam_from_world matrix shape: {W.shape}"
+            )
+
+        # Pinhole intrinsics (dense/sparse uses PINHOLE model after undistort)
+        params = cam.params  # depends on model; for PINHOLE: [fx, fy, cx, cy]
+        if cam.model_name == "PINHOLE":
+            fx, fy, cx, cy = params[0], params[1], params[2], params[3]
+        elif cam.model_name == "SIMPLE_PINHOLE":
+            fx = fy = params[0]
+            cx, cy = params[1], params[2]
+        else:
+            # Fall back to focal_length_x/y for pre-undistort models
+            fx = cam.focal_length_x
+            fy = cam.focal_length_y
+            cx = cam.principal_point_x
+            cy = cam.principal_point_y
+        K = np.array(
+            [[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32
+        )
+
+        img_path = f"{images_path}/{img.name}"
+        if not os.path.exists(img_path):
+            print(f"[train_gsplat] WARN: image not found: {img_path}")
+            continue
+        bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            print(f"[train_gsplat] WARN: cv2 failed to read: {img_path}")
+            continue
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+
+        # CLAUDE.md Check 1 (baked in): print real per-image stats once.
+        if not images_info:
+            print(
+                f"=== train_gsplat dataset sanity ===\n"
+                f"  first image   : {img.name}\n"
+                f"  rgb.shape     : {rgb.shape}\n"
+                f"  rgb.dtype     : {rgb.dtype}\n"
+                f"  rgb.min/max   : {rgb.min():.4f} / {rgb.max():.4f}\n"
+                f"  rgb.mean/std  : {rgb.mean():.4f} / {rgb.std():.4f}\n"
+                f"  viewmat.shape : {viewmat.shape}\n"
+                f"  K diag (fx,fy): {K[0, 0]:.2f}, {K[1, 1]:.2f}\n"
+                f"  K pp (cx, cy) : {K[0, 2]:.2f}, {K[1, 2]:.2f}\n"
+                f"  cam model     : {cam.model_name}\n"
+                f"  camera wxh    : {cam.width} x {cam.height}\n"
+                f"  K pp in bounds: "
+                f"{0 < K[0, 2] < cam.width and 0 < K[1, 2] < cam.height}\n"
+                f"==================================="
+            )
+            if rgb.min() < 0.0 or rgb.max() > 1.0:
+                return _fail(
+                    f"rgb out of [0,1] range: min={rgb.min()}, max={rgb.max()}"
+                )
+            if rgb.shape[2] != 3:
+                return _fail(f"rgb not HxWx3: got {rgb.shape}")
+            if np.isnan(rgb).any() or np.isinf(rgb).any():
+                return _fail("rgb contains nan/inf")
+
+        images_info.append(
+            {
+                "name": img.name,
+                "viewmat": viewmat,
+                "K": K,
+                "rgb": rgb,  # (H, W, 3) float32
+                "height": rgb.shape[0],
+                "width": rgb.shape[1],
+            }
+        )
+
+    if len(images_info) < 5:
+        return _fail(f"too few loaded images ({len(images_info)}) for training")
+
+    # Sort by name for deterministic train/test split
+    images_info.sort(key=lambda x: x["name"])
+    test_imgs = [img for i, img in enumerate(images_info) if i % test_every == 0]
+    train_imgs = [img for i, img in enumerate(images_info) if i % test_every != 0]
+    print(
+        f"[train_gsplat] split: {len(train_imgs)} train / {len(test_imgs)} test "
+        f"(test_every={test_every})"
+    )
+    if len(train_imgs) < 5 or len(test_imgs) < 1:
+        return _fail("degenerate train/test split")
+
+    # --- Initialize Gaussians from COLMAP sparse points ---
+    points = np.asarray(
+        [pt.xyz for pt in recon.points3D.values()], dtype=np.float32
+    )  # (N, 3)
+    colors_u8 = np.asarray(
+        [pt.color for pt in recon.points3D.values()], dtype=np.float32
+    )  # (N, 3) in [0, 255]
+    rgb_init = colors_u8 / 255.0
+
+    # Scales initialized from mean distance to 3 nearest neighbors (log space)
+    from scipy.spatial import KDTree
+
+    tree = KDTree(points)
+    dists, _ = tree.query(points, k=min(4, points.shape[0]))
+    mean_dist = dists[:, 1:].mean(axis=1).clip(min=1e-6)
+    log_scale_init = np.log(mean_dist).astype(np.float32)
+
+    N = points.shape[0]
+    means = torch.from_numpy(points).to(device)
+    scales = torch.from_numpy(
+        np.broadcast_to(log_scale_init[:, None], (N, 3)).copy()
+    ).to(device)
+    quats = torch.zeros((N, 4), dtype=torch.float32, device=device)
+    quats[:, 0] = 1.0  # (w, x, y, z) identity
+    opacities = torch.full(
+        (N,), float(np.log(0.1 / 0.9)), dtype=torch.float32, device=device
+    )  # logit(0.1)
+
+    # SH coefficients: sh0 holds view-independent base color, shN is zero-init
+    C0 = 0.28209479177387814  # SH basis evaluated at degree 0
+    sh0_init = ((rgb_init - 0.5) / C0).astype(np.float32)
+    sh0 = torch.from_numpy(sh0_init).unsqueeze(1).to(device)  # (N, 1, 3)
+    n_shN = (sh_degree + 1) ** 2 - 1
+    shN = torch.zeros((N, n_shN, 3), dtype=torch.float32, device=device)
+
+    params = {
+        "means": nn.Parameter(means),
+        "scales": nn.Parameter(scales),
+        "quats": nn.Parameter(quats),
+        "opacities": nn.Parameter(opacities),
+        "sh0": nn.Parameter(sh0),
+        "shN": nn.Parameter(shN),
+    }
+    optimizers = {
+        "means": torch.optim.Adam([params["means"]], lr=lr_means),
+        "scales": torch.optim.Adam([params["scales"]], lr=lr_scales),
+        "quats": torch.optim.Adam([params["quats"]], lr=lr_quats),
+        "opacities": torch.optim.Adam([params["opacities"]], lr=lr_opacities),
+        "sh0": torch.optim.Adam([params["sh0"]], lr=lr_sh0),
+        "shN": torch.optim.Adam([params["shN"]], lr=lr_shN),
+    }
+
+    print(f"[train_gsplat] initialized {N} Gaussians")
+
+    # --- gsplat imports (inside function to keep image builds lazy) ---
+    from gsplat.rendering import rasterization
+
+    try:
+        from gsplat.strategy import DefaultStrategy
+
+        strategy = DefaultStrategy(
+            # verbose=True makes gsplat print n_dupli/n_split/n_prune at every refinement event —
+            # essential observability for debugging N-stuck-at-init-count symptoms.
+            verbose=True,
+            # Must match rasterization's absgrad=True — DefaultStrategy reads info["means2d"].absgrad when True.
+            absgrad=True,
+            refine_start_iter=densify_start_iter,
+            refine_stop_iter=densify_stop_iter,
+            reset_every=reset_opacity_iter,
+            refine_every=refine_every,
+            grow_grad2d=densify_grad_threshold,
+        )
+        try:
+            strategy.check_sanity(params, optimizers)
+        except Exception as e:
+            print(f"[train_gsplat] strategy.check_sanity warning: {e}")
+        strategy_state = strategy.initialize_state()
+        strategy_ok = True
+    except Exception as e:
+        print(f"[train_gsplat] DefaultStrategy unavailable, training without densify: {e}")
+        strategy = None
+        strategy_state = None
+        strategy_ok = False
+
+    # --- Intermediate PSNR diagnostic (Day 9 experiment E) ---
+    def _eval_psnr_now(step_num: int) -> None:
+        """Quick PSNR-only eval of test views for intermediate diagnostics.
+
+        Fires at step 600 (before first refinement) and step 3000 (mid-densification)
+        to surface early whether PSNR is tracking the expected recovery. ~250ms total.
+        """
+        psnrs_here: list[float] = []
+        with torch.no_grad():
+            for img_ in test_imgs:
+                vm = torch.from_numpy(img_["viewmat"]).unsqueeze(0).to(device)
+                K_ = torch.from_numpy(img_["K"]).unsqueeze(0).to(device)
+                H_, W_ = img_["height"], img_["width"]
+                colors_all_ = torch.cat([params["sh0"], params["shN"]], dim=1)
+                renders_, _, _ = rasterization(
+                    means=params["means"],
+                    quats=normalize(params["quats"], dim=-1),
+                    scales=torch.exp(params["scales"]),
+                    opacities=torch.sigmoid(params["opacities"]),
+                    colors=colors_all_,
+                    viewmats=vm,
+                    Ks=K_,
+                    width=W_,
+                    height=H_,
+                    sh_degree=sh_degree,
+                    render_mode="RGB",
+                )
+                pred_ = renders_[0].clamp(0.0, 1.0).cpu().numpy().astype(np.float32)
+                gt_ = img_["rgb"]
+                mse_ = float(np.mean((pred_ - gt_) ** 2))
+                psnrs_here.append(
+                    -10.0 * np.log10(mse_) if mse_ > 0 else 100.0
+                )
+        med = float(np.median(psnrs_here))
+        n_g = int(params["means"].shape[0])
+        print(
+            f"[train_gsplat] step {step_num:5d}/{n_iterations}  INTERMEDIATE PSNR  "
+            f"median={med:.2f} dB  range=({min(psnrs_here):.2f}, "
+            f"{max(psnrs_here):.2f})  N={n_g}"
+        )
+
+    # --- Training loop ---
+    print(f"[train_gsplat] starting {n_iterations} iterations")
+    rng = np.random.default_rng(seed)
+
+    losses_log: list[float] = []
+    for step in range(n_iterations):
+        img = train_imgs[int(rng.integers(len(train_imgs)))]
+        viewmat = torch.from_numpy(img["viewmat"]).unsqueeze(0).to(device)  # (1, 4, 4)
+        K = torch.from_numpy(img["K"]).unsqueeze(0).to(device)  # (1, 3, 3)
+        gt_rgb = torch.from_numpy(img["rgb"]).to(device)  # (H, W, 3)
+        H, W = img["height"], img["width"]
+
+        # Active SH degree ramps up linearly to full over first 3000 iters
+        active_sh = min(sh_degree, step // max(1, (n_iterations // (sh_degree + 1))))
+
+        colors_all = torch.cat([params["sh0"], params["shN"]], dim=1)  # (N, K, 3)
+
+        try:
+            renders, alphas, info = rasterization(
+                means=params["means"],
+                quats=normalize(params["quats"], dim=-1),
+                scales=torch.exp(params["scales"]),
+                opacities=torch.sigmoid(params["opacities"]),
+                colors=colors_all,
+                viewmats=viewmat,
+                Ks=K,
+                width=W,
+                height=H,
+                sh_degree=active_sh,
+                render_mode="RGB",
+                absgrad=True,  # DefaultStrategy reads means2d.absgrad for densify
+            )
+        except Exception as e:
+            return _fail(f"rasterization failed at step {step}: {e}")
+
+        # Random-background augmentation per gsplat simple_trainer.py: composite the
+        # foreground renders against a per-step random background so that pixels with
+        # near-zero alpha carry no consistent training signal. Forces the model to
+        # learn alpha masks for foreground-only scenes like DTU instead of baking the
+        # background into Gaussian colors. Only during training; eval uses deterministic
+        # black background.
+        if random_bkgd:
+            bkgd = torch.rand(1, 3, device=device)
+            renders = renders + bkgd * (1.0 - alphas)
+
+        pred_rgb = renders[0]  # (H, W, 3)
+        loss_l1 = l1_loss(pred_rgb, gt_rgb)
+        # SSIM in (1, 3, H, W) per gsplat simple_trainer.py convention.
+        pred_bchw = pred_rgb.permute(2, 0, 1).unsqueeze(0)
+        gt_bchw = gt_rgb.permute(2, 0, 1).unsqueeze(0)
+        loss_ssim = 1.0 - tm_ssim(pred_bchw, gt_bchw, data_range=1.0)
+        loss = (1.0 - ssim_lambda) * loss_l1 + ssim_lambda * loss_ssim
+
+        if strategy_ok:
+            try:
+                strategy.step_pre_backward(
+                    params=params,
+                    optimizers=optimizers,
+                    state=strategy_state,
+                    step=step,
+                    info=info,
+                )
+            except Exception as e:
+                # Print on FIRST failure regardless of step — the old `if step == 0` guard
+                # silently swallowed any later exception, which made debugging impossible.
+                print(
+                    f"[train_gsplat] strategy.step_pre_backward disabled at step {step}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                strategy_ok = False
+
+        loss.backward()
+
+        if step == 0:
+            m2d = info.get("means2d")
+            _grad = getattr(m2d, "grad", None)
+            _absgrad = getattr(m2d, "absgrad", None)
+            m2d_shape = tuple(m2d.shape) if m2d is not None else None
+            if _grad is not None:
+                grad_desc = f"populated |g|.max={_grad.abs().max().item():.3e}"
+            else:
+                grad_desc = "None"
+            if _absgrad is not None:
+                absgrad_desc = f"populated ag.max={_absgrad.max().item():.3e}"
+            else:
+                absgrad_desc = "absent"
+            print(
+                "=== DefaultStrategy sanity (step 0) ===\n"
+                f"  info keys         : {list(info.keys())}\n"
+                f"  means2d type      : {type(m2d).__name__}\n"
+                f"  means2d.shape     : {m2d_shape}\n"
+                f"  means2d.grad      : {grad_desc}\n"
+                f"  means2d.absgrad   : {absgrad_desc}\n"
+                f"  strategy.absgrad  : {getattr(strategy, 'absgrad', 'n/a')}\n"
+                f"  grow_grad2d thr   : {getattr(strategy, 'grow_grad2d', 'n/a')}\n"
+                "======================================="
+            )
+
+        for opt in optimizers.values():
+            opt.step()
+            opt.zero_grad(set_to_none=True)
+
+        if step == 600 or step == 3000:
+            _eval_psnr_now(step)
+
+        if step == 600:
+            # Day 9 diagnostic: observe what _grow_gs will see at the first refinement event.
+            # Fires once in full runs, never in 5-iter smokes. Prints: grad2d stats, count stats,
+            # scene_scale, scale distribution, and the is_small/is_grad_high counts that gate
+            # duplication and splitting.
+            n_before = int(params["means"].shape[0])
+            print(f"\n=== pre-refine diagnostic (step 600) ===")
+            print(f"  strategy_ok = {strategy_ok}")
+            print(f"  N before    = {n_before}")
+            if strategy_ok and isinstance(strategy_state, dict):
+                g2d = strategy_state.get("grad2d")
+                cnt = strategy_state.get("count")
+                ssc = strategy_state.get("scene_scale")
+                print(f"  scene_scale = {ssc}")
+                if g2d is not None and cnt is not None:
+                    mean_grad = g2d / cnt.clamp_min(1)
+                    above = int((mean_grad > strategy.grow_grad2d).sum().item())
+                    print(
+                        f"  grad2d    : min={g2d.min().item():.3e} "
+                        f"max={g2d.max().item():.3e} mean={g2d.mean().item():.3e}"
+                    )
+                    print(
+                        f"  count     : min={int(cnt.min().item())} "
+                        f"max={int(cnt.max().item())} mean={cnt.mean().item():.2f}"
+                    )
+                    print(
+                        f"  mean_grad : min={mean_grad.min().item():.3e} "
+                        f"max={mean_grad.max().item():.3e} "
+                        f"mean={mean_grad.mean().item():.3e}"
+                    )
+                    print(
+                        f"  above {strategy.grow_grad2d:.1e} thr : {above} / {int(len(g2d))}"
+                    )
+                    # Multi-threshold sweep — lets a single smoke expose the full
+                    # above-threshold curve so tuning is data-driven, not guess-and-check.
+                    for _thr in (1e-3, 2e-3, 3e-3, 5e-3, 1e-2, 2e-2, 5e-2):
+                        _n = int((mean_grad > _thr).sum().item())
+                        _pct = 100.0 * _n / int(len(g2d))
+                        print(f"    above {_thr:.0e} : {_n:>5d} ({_pct:5.2f}%)")
+                else:
+                    print(f"  grad2d/count uninitialized: g2d={g2d} cnt={cnt}")
+                scales_exp = torch.exp(params["scales"]).max(dim=-1).values
+                thr_small = strategy.grow_scale3d * (ssc if isinstance(ssc, (int, float)) else 1.0)
+                is_small_n = int((scales_exp <= thr_small).sum().item())
+                print(
+                    f"  scales exp: min={scales_exp.min().item():.3e} "
+                    f"max={scales_exp.max().item():.3e} mean={scales_exp.mean().item():.3e}"
+                )
+                print(
+                    f"  is_small (scale<={thr_small:.3e}): {is_small_n} / "
+                    f"{int(scales_exp.numel())}"
+                )
+            print("==========================================\n")
+
+        if strategy_ok:
+            try:
+                # packed=True matches gsplat's packed info dict (means2d shape (nnz, 2),
+                # not (C, N, 2)). The Day 8 / Day 9 smokes used packed=False and crashed
+                # silently in _update_state at step 0 — masked by the broken except-guard.
+                strategy.step_post_backward(
+                    params=params,
+                    optimizers=optimizers,
+                    state=strategy_state,
+                    step=step,
+                    info=info,
+                    packed=True,
+                )
+            except Exception as e:
+                # Print on FIRST failure, unconditionally — the old `if step == densify_start_iter`
+                # guard could never fire because strategy_ok would already be False by the time
+                # step reached 500 if any earlier step had failed.
+                print(
+                    f"[train_gsplat] strategy.step_post_backward disabled at step {step}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                strategy_ok = False
+
+        if step % 500 == 0:
+            n_g = int(params["means"].shape[0])
+            print(
+                f"[train_gsplat] step {step:5d}/{n_iterations}  "
+                f"loss={loss.item():.4f}  N={n_g}"
+            )
+            losses_log.append(float(loss.item()))
+
+    n_final = int(params["means"].shape[0])
+    train_elapsed = time.time() - start
+    print(f"[train_gsplat] training done in {train_elapsed:.1f}s  final N={n_final}")
+
+    # --- Evaluation on held-out test views ---
+    from skimage.metrics import structural_similarity as _ssim
+
+    lpips_available = True
+    try:
+        import lpips as lpips_pkg
+
+        lpips_model = lpips_pkg.LPIPS(net="alex", verbose=False).to(device).eval()
+    except Exception as e:
+        print(f"[train_gsplat] LPIPS disabled: {e}")
+        lpips_available = False
+        lpips_model = None
+
+    def _psnr(a: np.ndarray, b: np.ndarray) -> float:
+        mse = float(np.mean((a - b) ** 2))
+        if mse == 0.0:
+            return 100.0
+        return float(-10.0 * np.log10(mse))
+
+    per_view: list[dict] = []
+    with torch.no_grad():
+        for img in test_imgs:
+            viewmat = torch.from_numpy(img["viewmat"]).unsqueeze(0).to(device)
+            K = torch.from_numpy(img["K"]).unsqueeze(0).to(device)
+            gt_rgb_np = img["rgb"]  # (H, W, 3) float32
+            H, W = img["height"], img["width"]
+
+            colors_all = torch.cat([params["sh0"], params["shN"]], dim=1)
+            renders, _, _ = rasterization(
+                means=params["means"],
+                quats=normalize(params["quats"], dim=-1),
+                scales=torch.exp(params["scales"]),
+                opacities=torch.sigmoid(params["opacities"]),
+                colors=colors_all,
+                viewmats=viewmat,
+                Ks=K,
+                width=W,
+                height=H,
+                sh_degree=sh_degree,
+                render_mode="RGB",
+            )
+            pred_rgb = renders[0].clamp(0.0, 1.0)
+            pred_np = pred_rgb.cpu().numpy().astype(np.float32)
+
+            # Save rendered PNG (BGR for cv2.imwrite)
+            pred_u8 = (pred_np * 255.0).round().clip(0, 255).astype(np.uint8)
+            bgr_out = cv2.cvtColor(pred_u8, cv2.COLOR_RGB2BGR)
+            cv2.imwrite(f"{renders_dir}/{img['name']}", bgr_out)
+
+            psnr_val = _psnr(pred_np, gt_rgb_np)
+            ssim_val = float(
+                _ssim(gt_rgb_np, pred_np, data_range=1.0, channel_axis=-1)
+            )
+
+            if lpips_available:
+                def _to_lp(x: np.ndarray) -> "torch.Tensor":
+                    t = torch.from_numpy(x).permute(2, 0, 1).unsqueeze(0).to(device)
+                    return t * 2.0 - 1.0
+
+                lpips_val = float(
+                    lpips_model(_to_lp(pred_np), _to_lp(gt_rgb_np)).item()
+                )
+            else:
+                lpips_val = None
+
+            per_view.append(
+                {
+                    "name": img["name"],
+                    "psnr": psnr_val,
+                    "ssim": ssim_val,
+                    "lpips": lpips_val,
+                }
+            )
+            print(
+                f"[train_gsplat]   test  {img['name']}  "
+                f"PSNR={psnr_val:.2f}  SSIM={ssim_val:.3f}  "
+                f"LPIPS={lpips_val if lpips_val is not None else 'n/a'}"
+            )
+
+    def _median(xs: list[float]) -> float:
+        return float(np.median(xs))
+
+    def _range(xs: list[float]) -> tuple[float, float]:
+        return (float(min(xs)), float(max(xs)))
+
+    psnr_vals = [v["psnr"] for v in per_view]
+    ssim_vals = [v["ssim"] for v in per_view]
+    lpips_vals = [v["lpips"] for v in per_view if v["lpips"] is not None]
+
+    psnr_median = _median(psnr_vals) if psnr_vals else None
+    psnr_range = _range(psnr_vals) if psnr_vals else None
+    ssim_median = _median(ssim_vals) if ssim_vals else None
+    ssim_range = _range(ssim_vals) if ssim_vals else None
+    lpips_median = _median(lpips_vals) if lpips_vals else None
+    lpips_range = _range(lpips_vals) if lpips_vals else None
+
+    # CLAUDE.md Check 5 (baked in): hard assertion on held-out PSNR range.
+    # For gsplat on DTU at 800x600, any value below 5 dB or above 60 dB
+    # (or nan/inf) means the eval is broken — a numerical clamp hiding
+    # identity, a data-range mismatch, or a rasterization failure. Better
+    # to fail loudly here than ship wrong numbers downstream.
+    # Skipped for n_iterations=0 sanity runs (expected initial PSNR depends
+    # on the COLMAP sparse init and may be outside this range).
+    if n_iterations >= 5 and psnr_median is not None:
+        if not math_ok(psnr_median):
+            return _fail(
+                f"median PSNR is nan/inf: {psnr_median}. "
+                f"per-view: {per_view}"
+            )
+        if not (5.0 < psnr_median < 60.0):
+            return _fail(
+                f"median PSNR {psnr_median:.2f} dB outside plausible range (5, 60). "
+                f"Either the rasterization is broken, the data range is wrong, "
+                f"or the evaluation is computing PSNR in the wrong space."
+            )
+
+    # --- Save checkpoint ---
+    ckpt_path = f"{out_dir}/gaussians.pt"
+    try:
+        torch.save(
+            {k: v.detach().cpu() for k, v in params.items()},
+            ckpt_path,
+        )
+    except Exception as e:
+        print(f"[train_gsplat] checkpoint save failed: {e}")
+
+    # --- Save summary JSON on-volume for posterity ---
+    summary = {
+        "run_id": out_run_id,
+        "colmap_run_id": colmap_run_id,
+        "seed": seed,
+        "n_iterations": n_iterations,
+        "n_gaussians_final": n_final,
+        "n_train_views": len(train_imgs),
+        "n_test_views": len(test_imgs),
+        "test_view_names": [v["name"] for v in per_view],
+        "psnr_median": psnr_median,
+        "ssim_median": ssim_median,
+        "lpips_median": lpips_median,
+        "per_view": per_view,
+        "losses_log": losses_log,
+    }
+    try:
+        with open(f"{out_dir}/summary.json", "w") as f:
+            json.dump(summary, f, indent=2)
+    except Exception as e:
+        print(f"[train_gsplat] summary save failed: {e}")
+
+    workspace_volume.commit()
+
+    total_elapsed = time.time() - start
+    print(f"[train_gsplat] total elapsed {total_elapsed:.1f}s")
+
+    return {
+        "success": True,
+        "run_id": out_run_id,
+        "colmap_run_id": colmap_run_id,
+        "seed": seed,
+        "n_iterations": n_iterations,
+        "n_gaussians_final": n_final,
+        "elapsed_seconds": total_elapsed,
+        "n_train_views": len(train_imgs),
+        "n_test_views": len(test_imgs),
+        "test_view_names": [v["name"] for v in per_view],
+        "psnr_median": psnr_median,
+        "psnr_range": psnr_range,
+        "ssim_median": ssim_median,
+        "ssim_range": ssim_range,
+        "lpips_median": lpips_median,
+        "lpips_range": lpips_range,
+        "per_view": per_view,
+        "checkpoint_path": f"{out_run_id}/gaussians.pt",
+        "renders_dir": f"{out_run_id}/renders",
+        "error": None,
+    }

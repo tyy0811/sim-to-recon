@@ -3,6 +3,11 @@
 /data/
 /results/
 
+# Local-only planning scratch — design docs, brainstorming outputs, handoffs.
+# These live on disk for reference but never get committed.
+docs/plans/
+preflight/
+
 # Build artifacts
 build/
 *.o
