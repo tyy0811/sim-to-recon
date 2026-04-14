@@ -851,6 +851,119 @@ gsplat_image = (
 )
 
 
+def _read_ply_xyz_rgb(path: str):
+    """Minimal binary little-endian PLY reader for x/y/z + r/g/b.
+
+    Designed for pycolmap's exported fused.ply format (the output of
+    pycolmap.stereo_fusion → recon.export_PLY). Does NOT support ASCII PLYs,
+    big-endian PLYs, or PLY files without the expected x/y/z/red/green/blue
+    properties. Fails loud on any unexpected structure rather than guessing.
+
+    Returns:
+        (xyz, rgb) where xyz is float32 shape (N, 3) and rgb is float32 shape
+        (N, 3) with values in [0, 255] — matching the sparse-init code path's
+        convention so the downstream gsplat init logic does not need to branch
+        on color dtype.
+
+    Used by train_gsplat's dense_init_ply_path branch (Day 11 experiment per
+    DECISIONS 26). The helper is module-level rather than nested so it is
+    reusable by any other Modal function that needs to load a fused PLY without
+    pulling in plyfile / open3d as new dependencies (the gsplat_image deliberately
+    keeps its dependency list minimal).
+    """
+    import numpy as np
+
+    with open(path, "rb") as f:
+        header_lines = []
+        while True:
+            line = f.readline()
+            if not line:
+                raise ValueError(f"PLY {path}: unexpected EOF in header")
+            header_lines.append(line)
+            if line.strip() == b"end_header":
+                break
+
+        header_str = b"".join(header_lines).decode("ascii", errors="replace")
+        if not header_str.startswith("ply\n"):
+            raise ValueError(f"PLY {path}: missing 'ply' magic")
+        if "format binary_little_endian" not in header_str:
+            raise ValueError(
+                f"PLY {path}: only binary_little_endian format supported; "
+                f"header begins: {header_str[:200]!r}"
+            )
+
+        # Parse vertex element + properties from the header
+        n_vertices = None
+        in_vertex_element = False
+        properties = []
+        for hline in header_str.splitlines():
+            hline = hline.strip()
+            if hline.startswith("element vertex"):
+                n_vertices = int(hline.split()[2])
+                in_vertex_element = True
+            elif hline.startswith("element ") and in_vertex_element:
+                in_vertex_element = False
+            elif hline.startswith("property ") and in_vertex_element:
+                parts = hline.split()
+                # `property <type> <name>` — list properties (`property list ...`)
+                # are not expected in pycolmap's fused.ply and are not handled
+                # here. If this assumption breaks, the dtype construction below
+                # will fail loudly.
+                if len(parts) != 3:
+                    raise ValueError(
+                        f"PLY {path}: unexpected property declaration: {hline!r}"
+                    )
+                properties.append((parts[1], parts[2]))
+
+        if n_vertices is None:
+            raise ValueError(f"PLY {path}: no vertex element found")
+        if not properties:
+            raise ValueError(f"PLY {path}: vertex element has no properties")
+
+        # Build numpy structured dtype matching the property declaration order
+        type_map = {
+            "float": "<f4", "float32": "<f4",
+            "double": "<f8", "float64": "<f8",
+            "uchar": "u1", "uint8": "u1",
+            "char": "i1", "int8": "i1",
+            "ushort": "<u2", "uint16": "<u2",
+            "short": "<i2", "int16": "<i2",
+            "uint": "<u4", "uint32": "<u4",
+            "int": "<i4", "int32": "<i4",
+        }
+        dtype_fields = []
+        for ptype, pname in properties:
+            if ptype not in type_map:
+                raise ValueError(
+                    f"PLY {path}: unsupported property type {ptype!r} for {pname!r}"
+                )
+            dtype_fields.append((pname, type_map[ptype]))
+        dtype = np.dtype(dtype_fields)
+
+        # Read binary body
+        data = np.fromfile(f, dtype=dtype, count=n_vertices)
+        if data.shape[0] != n_vertices:
+            raise ValueError(
+                f"PLY {path}: read {data.shape[0]} vertices, expected {n_vertices}"
+            )
+
+    field_names = data.dtype.names or ()
+    for required in ("x", "y", "z", "red", "green", "blue"):
+        if required not in field_names:
+            raise ValueError(
+                f"PLY {path}: missing required field {required!r}; "
+                f"available fields: {field_names}"
+            )
+
+    xyz = np.stack(
+        [data["x"], data["y"], data["z"]], axis=1
+    ).astype(np.float32)
+    rgb = np.stack(
+        [data["red"], data["green"], data["blue"]], axis=1
+    ).astype(np.float32)
+    return xyz, rgb
+
+
 @app.function(
     image=gsplat_image,
     gpu="A10G",
@@ -877,6 +990,7 @@ def train_gsplat(
     refine_every: int = 100,
     random_bkgd: bool = False,  # costs ~3 dB PSNR on DTU-style gray backgrounds; see DECISIONS 22. Opt-in for synthetic pure-black-bg datasets only.
     image_order_seed: int | None = None,  # When set, drives np.random.default_rng (per-step training-image sampler) independently of `seed`. When None, falls back to `seed` — backward-compatible with all Day 8/9/10 runs. Added for DECISIONS 23 P2 image-order-variance diagnostic.
+    dense_init_ply_path: str | None = None,  # When set, replaces sparse-SfM init with xyz+rgb from this PLY file. Path is relative to /workspace mount or absolute. Camera poses + intrinsics still come from colmap_run_id. None preserves Day 8/9/10 sparse-init behavior. Added for Day 11 dense-init experiment per DECISIONS 26.
 ) -> dict:
     """Train 3D Gaussian Splatting on a V1 COLMAP reconstruction.
 
@@ -1080,16 +1194,51 @@ def train_gsplat(
     if len(train_imgs) < 5 or len(test_imgs) < 1:
         return _fail("degenerate train/test split")
 
-    # --- Initialize Gaussians from COLMAP sparse points ---
-    points = np.asarray(
-        [pt.xyz for pt in recon.points3D.values()], dtype=np.float32
-    )  # (N, 3)
-    colors_u8 = np.asarray(
-        [pt.color for pt in recon.points3D.values()], dtype=np.float32
-    )  # (N, 3) in [0, 255]
+    # --- Initialize Gaussians (from sparse SfM points OR from a fused PLY) ---
+    # Day 8/9/10: dense_init_ply_path is None → sparse SfM init (recon.points3D).
+    # Day 11+: dense_init_ply_path is set → load xyz+rgb from a fused PLY.
+    # Camera poses, intrinsics, and image data still come from `recon` regardless
+    # of the init source — the PLY only replaces the point-cloud initialization.
+    if dense_init_ply_path is not None:
+        full_ply_path = (
+            dense_init_ply_path
+            if dense_init_ply_path.startswith("/")
+            else f"{VOLUME_MOUNT}/{dense_init_ply_path}"
+        )
+        print(f"[train_gsplat] dense init from PLY: {full_ply_path}")
+        try:
+            points, colors_u8 = _read_ply_xyz_rgb(full_ply_path)
+        except Exception as e:
+            return _fail(f"PLY read failed for dense_init_ply_path={dense_init_ply_path}: {e}")
+        print(
+            f"[train_gsplat] PLY init: {len(points)} points "
+            f"(replaces {n_sparse_pts} sparse SfM points; cameras + intrinsics still from colmap_run_id)"
+        )
+        # Degeneracy gate, not a methodology constraint: 100 is arbitrary but
+        # defensible — a usable dense init has thousands to hundreds of thousands
+        # of points; degenerate outputs are typically empty or single-digit. The
+        # threshold's job is to fail loud on a degenerate PLY, not to enforce a
+        # specific point-count target.
+        if len(points) < 100:
+            return _fail(
+                f"too few points in dense init PLY ({len(points)}) — expected at least 100"
+            )
+    else:
+        points = np.asarray(
+            [pt.xyz for pt in recon.points3D.values()], dtype=np.float32
+        )  # (N, 3)
+        colors_u8 = np.asarray(
+            [pt.color for pt in recon.points3D.values()], dtype=np.float32
+        )  # (N, 3) in [0, 255]
     rgb_init = colors_u8 / 255.0
 
-    # Scales initialized from mean distance to 3 nearest neighbors (log space)
+    # Scales initialized from mean distance to 3 nearest neighbors (log space).
+    # Operates on `points` regardless of init source. At dense-init density
+    # (~257k points for Day 11's scan9 fused PLY), nearest-neighbor distances
+    # are substantially tighter than at sparse-init density (~9k points), so
+    # per-point initial scales come out smaller — structurally correct, not a
+    # bug. A future reader debugging "why are dense-init Gaussians small?" gets
+    # the convention here.
     from scipy.spatial import KDTree
 
     tree = KDTree(points)

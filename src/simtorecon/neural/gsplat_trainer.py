@@ -26,6 +26,17 @@ class GsplatConfig(BaseModel):
         ..., description="COLMAP run_id on simtorecon-workspace volume"
     )
 
+    # Optional dense-init PLY — when set, gsplat reads xyz+rgb from this PLY
+    # file (path relative to /workspace mount, or absolute) instead of from
+    # the sparse SfM points in colmap_run_id's reconstruction. The colmap_run_id
+    # is still required for camera poses, intrinsics, and image data — the PLY
+    # only replaces the point-cloud initialization. Day 11 dense-init experiment
+    # uses this; Day 8/9/10 left it None and got the sparse-init behavior.
+    dense_init_ply_path: str | None = Field(
+        default=None,
+        description="Optional dense-init PLY path on simtorecon-workspace volume",
+    )
+
     # Training
     n_iterations: int = Field(default=7000, gt=0)
     seed: int = Field(default=42)
