@@ -599,6 +599,82 @@ this scene + V1-pipeline regime.
   findings per DECISIONS 29 Amendment 2's S_X3 pre-commit framing — the
   headline scope precludes method comparison from falsifying it.
 
+### Pre-commit failure modes catalogued
+
+Over the V1 → V1.5 progression, the repo catalogued five distinct
+pre-commit failure modes. Each entry below has a DECISIONS reference
+and a motivating example; each entry emerged from a specific
+failure-caught-in-progress event, not from a priori design. The
+taxonomy is additive — new modes get appended as new evidence
+accumulates.
+
+| # | Gap | Catalogued in | Motivating example | Catch mechanism |
+|---|---|---|---|---|
+| 1 | **Quantitative** | DECISIONS 23 → 25 | DECISIONS 23 pre-committed the frozen-recipe PSNR success band as 22.3 – 23.0 dB (±0.4 dB of a single-seed anchor at 22.62). The 3-seed Day 10 sweep produced median 21.32 dB with range 1.53 dB — outside the band, because the ≲1 dB noise assumption was not grounded in any prior data for this regime. | Use trigger thresholds, not target numerics |
+| 2 | **Structural** | DECISIONS 20 → 25 | DECISIONS 20's variance-source enumeration named sources (a) densification sampling and (b) rasterizer atomic-add ordering. It missed source (c) per-step image-order RNG entirely. Day 10's P2 diagnostic showed image-order accounts for ~1.5 dB of the 1.53 dB 3-seed frozen range — the entire observed variance. | Grep every RNG stream mechanically before pre-committing variance sources |
+| 3 | **Retrieval** | DECISIONS 26 addendum → DECISIONS 30 (promoted) | Four instances in the V1.5 chain with consistent mechanism; the fourth is the first post-commit instance (Day 12 Finding 1/2 rediscovery of V1's seed=123 best cell, caught during Day 13 re-read). See DECISIONS 30 for the full inventory and the promotion rationale. | Force memory into concrete commands (grep/ls/read/measure); re-read passes are load-bearing post-commit |
+| 4 | **Scenario-coverage** | DECISIONS 27 | Day 11 preflight Section 6.5's O2 scenario framing ("over-dens inside the [−4, +4] dB escalation band") enumerated sub-cases (a) "close to anchor" and (b) "slightly positive" but missed sub-case (c) "distinctly negative but not decisive." Step 9 observation at Δ = −3.55 dB landed in (c). Threshold logic was complete; interpretive enumeration was not. | Enumerate max and min plausible observations per branch, not just the prior-weighted center |
+| 5 | **Single-seed generalization** | DECISIONS 28 | Day 11 pre-committed "uniform degradation across all 4 views" for over-dens × dense init based on seed=42 alone (per-view [12.85, 16.46, 14.48, 16.23]). Step 11 escalation at seeds {123, 7} revealed view 001's 3-seed range was 7.60 dB (12.85 / 18.39 / 20.45) — a single-seed low-tail draw, not a recipe-level effect. Content framing committed before escalation data landed. | Distinguish structural framings (safe to pre-commit before escalation) from content framings (unsafe); replace content with "[pending escalation data]" placeholders |
+
+**Retrieval gap — the most-recurring mode.** Four instances across
+V1.5 (see DECISIONS 30 for commit refs and per-instance details):
+
+1. Source (d) determinism prior (DECISIONS 26 consolidation, pre-commit)
+2. Workspace-contract scaffolding for `rerun_dense_mvs` (Day 11 Smoke A, pre-commit)
+3. MVS view count label n=33 vs n=37 (Day 12 preflight, pre-commit, commit `812929e`)
+4. Day 12 Finding 1/2 rediscovery of V1's seed=123 chamfer 7.35 mm best cell (commit `b4e2c7d`, **post-commit**)
+
+The first three were caught before the incorrect claim reached git.
+The fourth was caught during Day 13's polish re-read, *after* being
+committed in the Day 12 writeup at `e8c6846`. The post-commit instance
+was the promotion trigger for DECISIONS 30 — it demonstrates that the
+retrieval-gap mechanism can produce damage under the existing discipline,
+and that re-read passes are a load-bearing catch mechanism rather than
+optional polish. The asymmetry in recurrence count (4 for retrieval,
+1 each for the other four slots) is itself methodology signal: retrieval
+gap is the failure mode the author commits most easily under time
+pressure (reaching into memory is fast; stopping to check is slow) and
+the one the catch mechanism has to cover most aggressively.
+
+**Candidate sixth gap — stated-uncertainty flattening (2 instances,
+deferred from formal cataloguing).** Two Day 12 instances share a
+consistent mechanism: a known quantity's uncertainty is correctly
+recorded at measurement time, then flattened to a point estimate in
+downstream reasoning.
+
+1. *Y-refinement miss.* Day 11's calibration probe recorded Y ∈ [3, 23]
+   ms/iter with 75% relative uncertainty, but the point estimate (13.4
+   ms/iter) was then used in subsequent cost projections as if it were
+   the distribution's center. Day 12's n=1000 probe measured
+   Y = 24.1 ± 1.4 ms/iter, at the upper edge of Day 11's envelope.
+   No downstream damage: ceilings held, budget held, narrative
+   unchanged.
+2. *Open3D wall-clock miss.* Day 12 task #3 preflight estimated ~30s
+   local CPU for the MVS evaluation; actual was 577s. Estimated from
+   a small-PLY prior, without propagating the uncertainty through the
+   actual target (Open3D chamfer against a 3.3M-point GT where
+   KD-tree NN-search dominates). Off by ~20×. No downstream damage.
+
+Both instances share: known quantity, stated-or-inferable uncertainty,
+flattening to a point estimate in downstream reasoning, zero
+consequence. Formal cataloguing as a sixth taxonomy slot is deferred
+under the repo's taxonomy-inflation guard — a candidate gap with no
+motivating example bearing downstream damage is weaker than the
+existing five, and promotion would overpay for the visibility. Trigger
+conditions for promotion: (a) a third instance with consistent
+mechanism, or (b) a first instance with downstream damage. Neither has
+materialized. This note is the holding record; a future session either
+adds a third instance and promotes, or lets the candidate age out.
+
+The five gaps (plus the candidate sixth) are failure modes of
+*pre-commit authoring discipline* — mistakes an author can make when
+writing a plan, a pre-commit, or a writeup under methodology pressure.
+They are not failure modes of experimental code, the eval pipeline, or
+the domain methods being compared. A reviewer skeptical of the
+methodology thesis can verify the taxonomy by following the commit
+refs and DECISIONS entries backward to the motivating events; each
+catch is git-legible.
+
 ## C++ Calibration Module
 
 Standalone C++17 camera calibration binary using OpenCV:
@@ -622,6 +698,17 @@ and intrinsics validity.
 - 800x600 resolution on Modal A10G (not DTU's native 1600x1200)
 - 3 seeds per view count, median ± range reporting; GPU PatchMatch non-determinism quantified rather than hidden
 - Open3D ICP alignment for evaluation, not DTU's official mask-aware Matlab evaluator — accounts for most of the absolute-number gap vs published SOTA
+
+**What V1.5 did not characterize.**
+
+- *Regime-dependence boundary between 9k and 257k init density.* Day 11 measured frozen and over-dens 3DGS at two endpoints (sparse 9k, dense 257k). The boundary behavior between those densities is not characterized. Frozen's PSNR advantage narrows 3.66 → 2.34 dB across the measured endpoints but preserves sign; whether a larger init (500k, 1M) would cross zero is an open question.
+- *Crossover point where frozen would lose to over-dens.* Unmeasured. The trend is narrowing; the crossover, if it exists, is outside V1.5's scope.
+- *Geometric-metric variance under source (d) above the ≤0.003% bound.* Day 12's bit-identical rerun of V1's seed=123 n=49 reconstruction bounds PatchMatch CUDA non-determinism at ≤0.003% on chamfer and F-score. A wider variance characterization across more PatchMatch reruns is out of scope; one reproduction is the bound.
+- *Cross-scene generalization of any V1.5 finding.* Everything in V1.5 is scan9-only. The four-row densification ablation (DECISIONS 21), the multi-seed sweep (Day 10, DECISIONS 25), the dense-init bounding (Day 11), and the cross-method three-regime table (Day 12) are all at the same scene + view-count + SfM sparse init. Multi-scene extension is V2 territory.
+- *Gsplat at its calibrated regime.* V1.5 tested gsplat at 9k SfM init (15× sparser than the ~100k-200k point regime its defaults calibrated for) and at 257k dense init (without a full densification calibration sweep). The "happy regime" for gsplat on DTU-style scenes was never tested in V1.5 — all gsplat data here is from off-calibration regimes.
+- *COLMAP MVS at full DTU protocol.* V1 tested n=49 with a 3-seed sweep; V1.5's Day 12 MVS cell reuses V1's best-seed n=49 datapoint as the cross-method reference. Neither V1 nor V1.5 runs COLMAP at DTU's full protocol (typically n > 49 with structured-light-aligned camera selection); that is out of scope for both versions.
+
+**Budget.** V1.5's cumulative Modal spend through Day 12 is **~$2.74 of the $50 cap set in the post-Day-9 plan** — about 5.5% of the budget. The remaining ~$47 of headroom was never load-bearing for Day 9–12 decisions; the binding constraint across the V1.5 chain was time, not money. Methodology discipline (pre-commit templates, escalation rules, gate trips, diagnostic re-runs, amendments before compute) cost more attention than compute, and cost less than failure recovery would have.
 
 ## Methodological Lineage
 
@@ -676,7 +763,7 @@ why each was wrong.
 - **PatchMatch parameter sweep.** Does tuning `min_num_pixels`, `window_radius`,
   or `filter_min_ncc` move the floor? A cheap way to find out whether the bimodal
   failure is fundamental to default PatchMatch or an artifact of the defaults.
-- **3D Gaussian Splatting comparison.** *(Executed in V1.5 Days 9–11 — see
+- **3D Gaussian Splatting comparison.** *(Executed in V1.5 Days 9–12 — see
   the "V1.5: 3DGS Densification Ablation" section above.)* 3DGS has different
   failure modes (scale/density vs geometric accuracy). The Day 9 four-row
   ablation showed that working densification is net-negative for PSNR on
@@ -687,8 +774,36 @@ why each was wrong.
   experiment (~257k points from COLMAP PatchMatch): frozen's PSNR advantage
   over over-dens narrows from 3.66 dB to 2.34 dB but preserves sign, so the
   headline holds at both tested init densities. Day 12 is the cross-method
-  PSNR comparison on the same held-out cameras.
+  three-regime comparison — COLMAP MVS on geometric metrics, 3DGS on
+  novel-view synthesis metrics, dashes in non-applicable cells per option
+  (c) in DECISIONS 29 Amendment 2 (no forced apples-to-apples).
 - **Conformal calibration of reconstruction quality.** Given the variance, a
   calibrated "at 95% confidence, n=X views will produce ≥Y fused points" bound
   would be more useful to practitioners than a point estimate. This is the
   direct analogue of sim-to-data's conformal thresholds, applied to geometry.
+- **V2 — a calibrated gate for silent failure modes.** V1 + V1.5 together
+  identified three distinct *silent* failure modes — each of which produces
+  plausible-looking aggregate numbers while being fundamentally broken, and
+  each of which V1/V1.5 caught by multi-seed discipline rather than
+  aggregate-metric inspection:
+  - *V1 bimodality at n ≤ 15.* SfM initialization either succeeds or
+    collapses to a near-degenerate reconstruction; median point counts hide
+    the distribution's bimodal character. Caught by 3-seed reporting at
+    each view count.
+  - *Gsplat densification miscalibration at 9k init* (DECISIONS 21). Default
+    `grow_grad2d = 2e-4` is calibrated for ~100k–200k SfM points; at 9k
+    it fires on 82% of Gaussians per refinement event, producing
+    over-parameterized reconstructions with sub-pixel noise that hurts
+    PSNR while preserving perceptual metrics. Caught by the four-row
+    ablation with a frozen baseline.
+  - *View-level seed instability under dense-init over-dens* (Day 11,
+    DECISIONS 28). View `rect_001` at over-dens × dense init shows a
+    7.60 dB range across 3 seeds — an order of magnitude above Day 10's
+    sparse-init seed ranges. Caught by Day 11's escalation to 3 seeds
+    after the seed=42 single-seed framing was falsified.
+  V2's goal is a calibrated gate that turns each of these silent failures
+  into a visible, actionable signal at reconstruction time — without
+  requiring a full 3-seed multi-run to surface it. The gate's design is
+  not pre-committed here; the motivation is that three silent modes is
+  enough evidence that visible-failure-at-runtime is a load-bearing property
+  for a practitioner downstream of this pipeline.
