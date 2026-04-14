@@ -691,6 +691,27 @@ Classification into the post-escalation analog of outcome 1 or outcome 2 is mech
 
 Ceiling ~$0.50 *conditional on the source (d) verification gate not firing* (~3.3× the post-Day-9 plan's single-seed $0.15 estimate). If the gate fires, the dense-init experiment design needs revision and the additional cost is not pre-committed in this entry — that is a separate decision triggered by the verification result, not a row of this table. The bottom three rows of the table are reachable only after the verification passes; a reader who reads them as the bounded cost surface should understand they are conditional on the first row not firing. Expected value across the verification-passes branches lands somewhere between $0.20 and $0.50, weighted by which outcome the data produces. Each escalation absorbs the per-recipe discipline tax from Day 10's pattern (verification + smoke before launching the multi-seed extension). The 3.3× multiplier on Day 11 is *lower* than Day 10's ~5× discipline tax (Day 10 = verification + reproducibility check + P2 diagnostic on top of the naive sweep), reflecting that verification is smaller relative to Day 11's main experiment and that escalation is conditional rather than unconditional. Methodology machinery maturing per-decision, not paying a fixed tax.
 
+**Amendment 1 (post-Step-9, 2026-04-14): Ceiling recalibration pre-escalation.**
+
+Triggered by Step 9 empirical cost landing at ~$0.12 (395.2s wall-clock) against an implicit projection of ~$0.06 in the original cost table. Over-dens × seed=42 × init A at 7000 iters grew Gaussians from 257,687 to 1,545,441 across densify iters 500–5000, and the densify-stop tail (iters 5000–7000) runs at substantially higher per-iter cost than the frozen-recipe probe measured. The original cost table extrapolated both recipes from a single calibration probe at frozen N=257k (~13 ms/iter, weakly N-dependent), and that Y estimate is a lower bound on over-dens per-iter, not a point estimate. The original table under-projected over-dens by ~2×.
+
+Recalibrated cost table (Amendment 1):
+
+| Outcome | Original | Amended | Reason |
+|---|---|---|---|
+| Source (d) gate fires (hard stop) | ~$0.15 | ~$0.15 | Unchanged — gate fires before over-dens runs, so recalibration does not apply |
+| Verification passes + both decisive (no escalation) | ~$0.20 | ~$0.35 | Verification legs + Step 9 at correct over-dens cost (~$0.12 vs projected ~$0.06) |
+| Verification passes + one recipe escalates | ~$0.35 | ~$0.55 | Above + 2 additional recipe-specific seeds at correct cost (frozen escalation ~$0.12, over-dens escalation ~$0.24) |
+| Verification passes + both recipes escalate | ~$0.50 | ~$0.70 | Above + the other recipe's 2 seeds |
+
+Ceiling: ~$0.70 in the worst case (down from originally-projected $0.50 being a factor-of-√2 off from reality, not off by an order of magnitude — the structural shape of the cost table is correct, the per-recipe scaling was wrong).
+
+**Budget pressure is methodological, not financial.** V1.5 total at the ~$0.70 Day 11 ceiling would land at ~$2.76 of the $50 V1.5 cap — still ~$47 of headroom. The amendment exists to preserve the discipline of "amend pre-commits before exceeding them, not after," which is the DECISIONS 25 pattern whose violation produced the DECISIONS 23 anchoring failure. If this amendment were deferred until after escalation compute landed, the Day 11 entry would read "ceiling $0.50, actual $0.70, 40% overrun" — structurally identical to DECISIONS 23's pre-commit-vs-observation mismatch. The amendment preserves pre-commit → observation comparison honesty.
+
+**Calibration miss lesson (for future dense-init cost projections):** probe-based per-iter estimates are recipe-specific. A frozen-recipe probe measures held-capacity per-iter at fixed N and cannot be applied directly to densifying recipes where N grows during training. Future dense-init cost projections should calibrate both recipes separately (one probe at the frozen target N, one probe at the over-dens target with a short densify window) before committing a ceiling to a pre-commit. The fix is structural — use recipe-matched calibration probes — not "pad the ceiling by 2× to cover uncertainty." Padding without calibration would reintroduce the DECISIONS 20 structural-gap pattern at the cost-estimation level.
+
+This amendment does NOT change: escalation thresholds, decisive bands, outcome templates, source (d) gate, or any methodology contract. It changes only the projected cost ceiling and records the lesson about recipe-specific calibration.
+
 **Alternatives considered and rejected:**
 
 - *Unconditional single-seed (brainstorming option A):* knowingly repeats the DECISIONS 23 failure pattern at the same statistical resolution Day 10 just falsified.
