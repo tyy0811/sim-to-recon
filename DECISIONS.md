@@ -590,3 +590,124 @@ Day 10 total ≈ $1.41, well under the spec's $50 cap and well under the origina
 - The DECISIONS 20 structural-gap claim (source (c) missing) is validated for the frozen recipe but not for over-dens. On over-dens, multiple sources are live and DECISIONS 25 does not claim (c) dominates — only that it contributes and is worth naming in any future pre-commit of this kind.
 
 All three claims are consistent with the V1 / V1.5 variance-as-contribution framing: name the mechanism to the strength the data supports, name the uncertainty where it doesn't, and let the reader judge.
+
+---
+
+## 26. Day 11 dense-init experiment — adaptive escalation, per-recipe thresholds, pre-committed writeup templates
+
+**Decision (pre-commit form, written before any Day 11 compute):** Day 11's COLMAP-dense-init experiment runs seed=42 first on both recipes (frozen at dense init, default-densification at dense init), and escalates to seeds {123, 7} *per recipe independently* if the observed |Δ| against the matched-seed-42 sparse-init anchor falls inside that recipe's pre-committed escalation band. The anchors are Day 10 sweep results at seed=42 — frozen 22.56 dB, over-dens 18.90 dB — not DECISIONS 21's single-seed-from-Day-9 numbers and not DECISIONS 25's median-of-medians. The comparison is matched-seed sparse-init vs dense-init; the regime delta is the quantity of interest.
+
+**Anchor rationale.** The matched-seed-42 choice holds image-order variance constant between the sparse-init anchor and the dense-init experimental run, isolating the regime effect from image-order permutation (DECISIONS 25's dominant variance source for frozen). Median-of-medians would confound the regime effect with cross-seed averaging of image-order permutations; DECISIONS 21's single-seed numbers would additionally confound with the pre-`image_order_seed` code path (before DECISIONS 25's `modal_app.py` addition of explicit image-order RNG control). Seed=42 matched-seed is the unique choice that leaves only the init-density variable free.
+
+**What this is NOT a decision about:**
+- Whether dense-init is the right Day 11 experiment. Locked by the post-Day-9 plan; this entry is about *how* to run it, not *whether*.
+- The specific COLMAP dense-MVS threshold settings used to produce a 30–50k-point init. Per the plan, "reasonable defaults, not a tuned choice"; logged in the preflight file as observed values, not pre-committed targets.
+- The specific COLMAP dense-MVS seed or random-state choice used to produce dense init A. The seed is logged in the preflight but not pre-committed; if source (d) verification passes, the specific seed's identity is irrelevant to the escalation rule and becomes reproducibility metadata, not a decision variable.
+- Whether V2 gets built. Trigger condition unchanged from the post-Day-9 plan §V2.1.
+- Day 12 cross-method seed strategy. Day 12 reuses Day 10 multi-seed artifacts for the 3DGS rows; the COLMAP MVS row's seed treatment is a separate decision at Day 12 launch.
+
+**Variance sources enumerated before launch** (per `feedback_rng_stream_enumeration.md`, applied as a first-class operational rule, not a reasoning hint):
+
+| Source | Frozen dense-init | Over-dens dense-init |
+|---|---|---|
+| (a) gsplat split/duplicate sampling | structurally inactive (frozen) | live |
+| (b) rasterizer atomic-add ordering | live, ~0.03 dB floor (Day 10 P2 Run A vs sweep_s42) | live, magnitude not isolated |
+| (c) per-step image sampler `np.random.default_rng(image_order_seed)` | live, ~1.5 dB on sparse init (DECISIONS 25 P2) | live, magnitude not isolated |
+| (d) COLMAP dense-MVS internal stochasticity (newly active for Day 11; not present in Day 10's sparse-init experiments) | known stochasticity at the CUDA-thread-scheduling level per DECISIONS 16; magnitude at n=33 in the dense-init regime unknown; pre-launch verification quantifies (hard stop if magnitude exceeds 0.5 dB floor) | same source, same verification (run on frozen only); failure invalidates over-dens escalation rule too |
+
+**Source (d) pre-launch verification.** Source (d) is the only new variance source the dense-init experiment introduces, and it sits *upstream* of the entire escalation rule — if COLMAP dense-MVS produces inits whose downstream PSNR varies by an amount comparable to the 2.0/4.0 dB escalation thresholds, the rule cannot isolate a regime effect from COLMAP noise. Operational threshold: **if repeated COLMAP dense-MVS runs at fixed seed produce inits whose downstream 3DGS frozen-recipe PSNR at seed=42 differs by more than 0.5 dB, source (d) invalidates the Day 11 escalation rule and the rule needs revision before launch.** The 0.5 dB operational floor is chosen to leave the frozen escalation threshold (2.0 dB) at least 4× headroom above source (d) noise — the same "noise floor must be substantially below threshold" discipline DECISIONS 24's verification gate applied. The frozen recipe is the binding constraint; over-dens's 4.0 dB threshold has 8× headroom at the same floor.
+
+Six-step verification sequence:
+
+1. COLMAP dense-MVS run #1 at fixed seed → dense init A
+2. COLMAP dense-MVS run #2 at the same fixed seed → dense init B
+3. Frozen 3DGS at seed=42 on dense init A → PSNR_A
+4. Frozen 3DGS at seed=42 on dense init B → PSNR_B
+5. |PSNR_A − PSNR_B| < 0.5 dB → source (d) is below operational floor; proceed with escalation rule; set dense init A as the experimental init; the specific COLMAP seed becomes reproducibility metadata (per scope item above)
+6. |PSNR_A − PSNR_B| ≥ 0.5 dB → STOP. Source (d) is live and meaningfully large. Day 11 design needs revision: either fix to a multi-COLMAP-seed × multi-3DGS-seed factorial (substantially more expensive), or characterize source (d) as a third variance dimension and report dense-init results with explicit (d)-magnitude framing. This is a hard gate — no fallback to "fold it into the writeup later," because (d) being uncharacterized would propagate through both recipes' escalation decisions and produce a falsified DECISIONS 26 of exactly the kind DECISIONS 25 just documented.
+
+Verification is run on frozen only, not over-dens. Frozen isolates source (d) cleanly — no densification dynamics to confound the PSNR comparison. Running verification on over-dens would mix source (d) with source (a) split/duplicate sampling variance, defeating the purpose of measuring (d) in isolation. The frozen verification result is treated as bounding source (d) across both recipes.
+
+Verification cost: ~$0.15 (one extra COLMAP dense-MVS run + one extra 3DGS frozen run at seed=42), ~0.5 hour wall-clock. Folds into the Day 11 baseline cost summary below.
+
+V1 documented in DECISIONS 16 that GPU PatchMatch is non-deterministic at the CUDA-thread-scheduling level, with two n=30 runs at identical seeds producing fused point counts differing by ~100× (24,322 vs 178) in the failure regime. Day 11 runs PatchMatch at n=33, three views above V1's measured n=30 stress point. The verification is therefore not insurance against a low-probability failure — it is a load-bearing measurement of a known-non-zero stochasticity source at a view count V1 did not directly characterize. Prior on the n=33 magnitude: plausibly ranges from "much smaller than at n=30 because we are above the stress cliff" to "still severe because n=33 is close to n=30." The 0.5 dB gate discriminates between these regimes — if the gate does not fire, the dense-init experiment proceeds with a single fixed init; if it fires, Day 11's design needs revision per the hard-stop branch above before any further compute lands.
+
+**Per-recipe escalation rule.**
+
+**Decisive-band semantics.** Decisive means the single-seed observation is the conclusion. No discretionary escalation — if Δ lands in the decisive band, the sweep does not run additional seeds even if the result is surprising. The Δ > +2.0 dB frozen branch is the case where the temptation is strongest (the result is unexpected and "let me confirm with more seeds" sounds like good practice); the pre-commit explicitly forbids it. Surprise goes to the writeup, not to additional runs.
+
+**Frozen recipe at dense init.**
+- Anchor: Day 10 sweep, seed=42, sparse-init frozen = 22.56 dB
+- Decisive band: |Δ_frozen| > 2.0 dB
+  - Δ > +2.0 dB: dense init *helps* frozen. Unexpected — the frozen recipe is capacity-fixed at N=9044 by mechanism design, so a positive Δ would mean dense init is teaching the optimizer something the sparse init couldn't, and DECISIONS 21's mechanism story needs revision. Single-seed sufficient; write up the surprise.
+  - Δ < −2.0 dB: dense init *hurts* frozen. Consistent with "the bigger init handed the optimizer more wrong points to render at fixed capacity." Single-seed sufficient.
+  - −2.0 dB ≤ Δ ≤ +2.0 dB: escalate to seeds {123, 7}.
+- Threshold rationale: 2.0 dB is above Day 10's frozen sparse-init seed range (1.53 dB) by 0.47 dB. Sufficient margin that a single-seed delta exceeding it cannot be confused for image-order permutation noise at the resolution Day 10 characterized.
+
+**Default-densification recipe at dense init.**
+- Anchor: Day 10 sweep, seed=42, sparse-init over-dens = 18.90 dB
+- Decisive band: |Δ_overdens| > 4.0 dB
+  - Δ > +4.0 dB: dense init *recovers* default densification. Headline narrows to "default densification is sparse-init-broken specifically; dense init makes it work." Strong narrative shift. Single-seed sufficient.
+  - Δ < −4.0 dB: dense init makes default densification *even worse*. Strengthens headline ("densification miscalibration extends across init densities"). Single-seed sufficient.
+  - −4.0 dB ≤ Δ ≤ +4.0 dB: escalate to seeds {123, 7}.
+- Threshold rationale: 4.0 dB is above Day 10's over-dens sparse-init seed range (3.19 dB) by 0.81 dB. Tighter relative margin than frozen's because over-dens's variance floor itself is wider; tightening the threshold further would risk escalating in cases where the actual regime effect is real but small.
+
+**No joint sign-consistency clause.** Each recipe is evaluated against its own threshold independently. A frozen-positive / over-dens-negative outcome (or vice versa) is a *finding* (asymmetric init-density dependence; see outcome 2 below), not a reason to escalate.
+
+**Threshold honesty.** The 2.0 / 4.0 thresholds are pre-committed against Day 10's sparse-init seed ranges. They do NOT account for dense-init seed ranges, which are a known unknown. If a recipe escalates and its dense-init range turns out to be wider than its sparse-init range, the escalation produces an interpretable multi-seed distribution to report — the threshold's job is to detect when single-seed is insufficient, not to land in band. This is the structural difference from DECISIONS 23: 23 pre-committed a *target band* that observation falsified; 26 pre-commits a *trigger* that observation either fires or doesn't, with the writeup well-defined in both cases.
+
+**Pre-committed writeup templates** (skeletons; numerical blanks `{value}` filled in separately at observation time, narrative blanks composed at observation time; no on-the-fly arithmetic — derived fields are recorded as their own blanks):
+
+**Outcome 1 — Both decisive, same-sign Δs** (both recipes' |Δ|s exceed their thresholds; both Δs share a sign).
+
+> "Dense init at ~{N_dense}k points {helps/hurts} both recipes. Dense-init frozen PSNR: {value} dB (Δ_frozen = {value} dB). Dense-init over-dens PSNR: {value} dB (Δ_overdens = {value} dB). Frozen-over-dens advantage at dense init: {value} dB. Compare sparse-init advantage: 3.66 dB. {Headline-strengthening framing if frozen advantage preserved or grown — extend DECISIONS 21's grow_grad2d=2e-4 calibration claim from sparse-init artifact to a broader regime statement. Headline-narrowing framing if frozen advantage shrunk but did not reverse — partial regime-dependence with the boundary above ~{N_dense}k.}"
+
+The frozen-over-dens advantage is a derived field — recorded as its own blank, not computed inside the template. The person filling the template enters all four PSNR/Δ values from the run JSONs, then enters the advantage as a fifth separate value computed in a Python REPL or by hand and double-checked. This separates observation (the four primary blanks) from arithmetic (the fifth derived blank).
+
+**Outcome 2 — Both decisive, opposite-sign Δs (asymmetric init-density dependence).**
+
+> "Dense init bounds the headline asymmetrically. Frozen Δ = {value} dB ({sign}); over-dens Δ = {value} dB ({opposite sign}). {Whichever recipe benefits} responds to dense init while {the other} does not. Headline narrows to: 'frozen wins on PSNR at sparse init; the densification-vs-frozen ordering is init-density-dependent,' with the regime boundary identified at the observed crossover. Stronger finding than outcome 1 because it identifies a falsifiable bound where the headline ordering ceases to apply, rather than a robustness claim."
+
+**Outcome 3 — One recipe decisive, one escalated.**
+
+> "{Decisive recipe} dense-init Δ = {value} dB ({sign}), outside the {2.0/4.0} dB single-seed escalation band; reportable from one seed. {Escalated recipe} seed=42 Δ = {value} dB inside its band; multi-seed extension to {123, 7} added; observed median Δ = {value} dB across 3 seeds, seed-to-seed range {value} dB. Combined finding: {composed at observation time once both recipes have defensible characterizations.}"
+
+Classification into the post-escalation analog of outcome 1 or outcome 2 is mechanical, not a judgment call: combine the decisive recipe's single-seed Δ with the escalated recipe's median Δ and apply the same same-sign vs opposite-sign criterion that distinguishes outcome 1 from outcome 2 in the both-decisive case. The classification is a derived field, recorded as such alongside the observed values.
+
+**Outcome 4 — Both escalated.**
+
+> "Single-seed seed=42 was insufficient on either recipe (frozen Δ = {value}, over-dens Δ = {value}, both inside their escalation bands). Both recipes extended to seeds {42, 123, 7}; observed frozen median Δ = {value} dB with seed range {value} dB; over-dens median Δ = {value} dB with seed range {value} dB. {Bounded headline language composed at observation time.}"
+
+Classification into the post-escalation analog of outcome 1 or outcome 2 is mechanical: compare frozen-median Δ and over-dens-median Δ against the same-sign vs opposite-sign criterion. Derived field, recorded as such.
+
+**Cost summary.**
+
+| Outcome | Approximate cost | Wall-clock |
+|---|---|---|
+| Source (d) verification fires the gate (hard stop, design revision needed) | ~$0.15 (verification only); redesign is a separate decision triggered by the verification result; plausible magnitude is multi-seed × multi-init factorial (~$2–4) or dense-init abandoned entirely ($0) | stop and reconsider |
+| Verification passes + both decisive (no escalation) | ~$0.20 | ~0.5 day |
+| Verification passes + one recipe escalates | ~$0.35 | ~0.75 day |
+| Verification passes + both recipes escalate | ~$0.50 | ~1 day |
+
+Ceiling ~$0.50 *conditional on the source (d) verification gate not firing* (~3.3× the post-Day-9 plan's single-seed $0.15 estimate). If the gate fires, the dense-init experiment design needs revision and the additional cost is not pre-committed in this entry — that is a separate decision triggered by the verification result, not a row of this table. The bottom three rows of the table are reachable only after the verification passes; a reader who reads them as the bounded cost surface should understand they are conditional on the first row not firing. Expected value across the verification-passes branches lands somewhere between $0.20 and $0.50, weighted by which outcome the data produces. Each escalation absorbs the per-recipe discipline tax from Day 10's pattern (verification + smoke before launching the multi-seed extension). The 3.3× multiplier on Day 11 is *lower* than Day 10's ~5× discipline tax (Day 10 = verification + reproducibility check + P2 diagnostic on top of the naive sweep), reflecting that verification is smaller relative to Day 11's main experiment and that escalation is conditional rather than unconditional. Methodology machinery maturing per-decision, not paying a fixed tax.
+
+**Alternatives considered and rejected:**
+
+- *Unconditional single-seed (brainstorming option A):* knowingly repeats the DECISIONS 23 failure pattern at the same statistical resolution Day 10 just falsified.
+- *Unconditional multi-seed at {42, 123, 7} (brainstorming option B):* overpays when the dense-init effect is decisive at single-seed. Day 10's 4.7× cost overrun is the relevant counterfactual; pre-paying for multi-seed + verification on a likely-decisive experiment compounds the discipline tax.
+- *Joint sign-consistency escalation rule (the original (C) from brainstorming):* collapses asymmetric findings (outcome 2) into "ambiguous, escalate" and overpays in the most informative case.
+- *Bayesian posterior-threshold escalation:* over-engineered, no prior runs to fit a posterior on, harder to pre-commit and verify than a simple per-recipe threshold rule.
+
+**Connection to the methodology meta-pattern (DECISIONS 20 → 23 → 24 → 25 → 26):**
+
+DECISIONS 20 named the wrong variance sources (structural gap). DECISIONS 23 anchored on a single point estimate (quantitative gap). DECISIONS 24 pre-committed mechanism + verification gate (success). DECISIONS 25 documented both gaps and added the RNG-enumeration generalization. DECISIONS 26 attempts to get all three right at once: variance enumeration before launch (the variance sources table + source (d) verification above), conditional escalation thresholds rather than fixed bands (the per-recipe escalation rule), and pre-committed writeup templates so observation-time writeup is mechanical not creative-under-pressure (outcomes 1–4 above). Whether DECISIONS 26 succeeds is decided post-observation when the actual outcome lands and the templates either fit cleanly or get modified — which itself becomes the next entry in the sequence.
+
+**Self-catch during consolidation (taxonomy addendum).** The initial consolidated draft of DECISIONS 26 framed source (d) with a determinism prior. Drafting the preflight surfaced contradictory evidence already in the repo: DECISIONS 16 documents GPU PatchMatch as non-deterministic at the CUDA-thread-scheduling level, with two n=30 runs at identical seed producing 24,322 vs 178 fused points. The entry was amended before commit; edits scoped to the source (d) framing (table cell + verification-paragraph rewrite) and not the structural pieces of the rule. This adds a *third* pre-commit failure mode to the DECISIONS 25 taxonomy: alongside the *structural* gap (Gap 2, missing source (c)) and the *quantitative* gap (Gap 1, anchored success bands), there is now a *retrieval* gap — reasoning from memory about prior repo findings without grepping the file. The catch mechanism is forcing memory into concrete commands; the preflight is itself a pre-commit verification step, not just operational scaffolding. See `feedback_rng_stream_enumeration.md` for the analogous RNG-enumeration self-catch.
+
+**Honest scope of what this decision pre-commits:**
+
+- Escalation thresholds (2.0 / 4.0 dB) are pre-committed against Day 10's observed sparse-init seed ranges. They do NOT account for dense-init seed ranges (the unknown the experiment is characterizing). The threshold's job is detection of insufficient single-seed evidence, not landing in a target band.
+- Writeup templates fix the *structure* (which outcome, which clauses, which numbers) before observation. The *language* inside narrative blanks is composed at observation time. The pre-commit covers the mechanical part only; observation-time judgment is required for the narrative, and derived fields (frozen-over-dens advantage, outcome-3/4 classification) are recorded as their own blanks rather than computed in-template.
+- Variance source enumeration is best-effort. Sources (a)–(c) come directly from Day 10; source (d) is a known stochasticity source from V1 (DECISIONS 16) whose magnitude at n=33 is gated on the verification above. If a fifth source surfaces during verification or the seed=42 smoke, DECISIONS 26 needs revisiting *before* escalation, not after.
+- Source (d) verification covers COLMAP dense-MVS *PSNR-impact magnitude at n=33* only. It does not cover whether the specific COLMAP threshold settings actually produce the expected ~30–50k point count — that's a Day 11 execution check, not a methodological pre-commit.
+- This decision does not pre-commit what happens if COLMAP cannot reliably produce a 30–50k-point dense init. Per the Day 11 plan: try relaxed `--SiftExtraction.max_num_features` and dense MVS thresholds; if can't hit 30k cleanly, document the attempt and ship Day 9 headline with explicit "dense-init bounding not achieved, framework preserved for future work" caveat. That's a Day 11 execution contingency, not a DECISIONS 26 contingency.
