@@ -807,3 +807,88 @@ These are complementary, not substitutes. A pre-commit that passes all four is D
 - This entry does not pre-commit how future dense-init experiments should calibrate N_final bands. Recipe-specific calibration probes (queued as a Day 12 prerequisite for timing; extendable to N_final calibration) are the operational mitigation, but the specific probe design is not pre-committed here.
 
 **Precedent value.** If future work runs into pre-commit friction from a tight acceptance band on an uncalibrated metric, the pattern is: document the band trip, evaluate the four criteria, write the DECISIONS entry, and proceed (or stop, if any criterion fails). The override mechanism exists because pre-commit discipline cannot be *so* strict that any band trip halts progress regardless of context — that would create a perverse incentive to write intentionally loose bands. Strict bands + documented override is a better equilibrium than loose bands without review, because the override forces explicit analysis of the trip rather than ignoring it.
+
+## 28. Single-seed generalization gap — fifth pre-commit failure mode
+
+**Motivating example (2026-04-14, Day 11 Step 11 escalation).** The Day 11 writeup in README.md (commit `a5c50f6`) contains a transparently-recorded pre-commit correction in Finding (1) "Per-view redistribution differs by recipe." The correction reads:
+
+> *Before escalation, I pre-committed a per-view framing for over-dens based on seed=42 data alone, describing it as "uniform degradation across all 4 views." The 3-seed data falsifies this — view 001's seed=42 value of 12.85 dB was a low-tail draw, not representative of the recipe-level effect.*
+
+The pre-commit framing lived in preflight Section 6.5 item 2b, written after Step 9 landed (Δ_overdens = −3.55 dB at seed=42, inside the [-4, +4] over-dens escalation band). Step 9 produced per-view PSNRs [12.85, 16.46, 14.48, 16.23] — a picture where all four views degraded from sparse-init anchor. I framed this as "uniform degradation across all 4 views" and committed it as part of the pre-escalation interpretive framing for the writeup.
+
+Step 11 escalation at seeds {123, 7} produced per-view PSNRs:
+  seed=123: [18.39, 16.54, 14.24, 15.79]
+  seed=7:   [20.45, 17.77, 14.67, 14.70]
+
+Combined with seed=42, the 3-seed per-view picture is:
+  rect_001: 12.85 / 18.39 / 20.45 → median 18.39, range **7.60 dB**
+  rect_014: 16.46 / 16.54 / 17.77 → median 16.54, range 1.31 dB (flat vs sparse)
+  rect_028: 14.48 / 14.24 / 14.67 → median 14.48, range 0.43 dB (consistently −5 dB)
+  rect_041: 16.23 / 15.79 / 14.70 → median 15.79, range 1.53 dB
+
+The "uniform degradation" framing was falsified. What was actually happening: view 028 is consistently worst across all 3 seeds with tight range; view 041 is moderately worse with tight range; view 001 is **highly seed-sensitive** (range 7.60 dB), and its seed=42 value of 12.85 was a low-tail draw on its seed-range distribution; view 014 is approximately flat across seeds. The pre-escalation framing described a recipe-level effect ("over-dens shows uniform degradation") based entirely on what turned out to be one draw from a seed-variable view's distribution.
+
+**The failure mode.** Pre-commit framings of recipe-level interpretive claims, based on single-seed observations, *when* the pre-commit rule itself calls for escalation to multi-seed specifically because single-seed may not generalize. This is a distinct failure mode because the pre-commit structure is internally contradictory: the escalation rule exists to check single-seed generalization, and the pre-escalation framing for the escalation outcome is itself a single-seed claim about what will generalize.
+
+**Naming.** *Single-seed generalization gap.* Fifth entry in the DECISIONS 25 taxonomy.
+
+**Distinguishing from the other four failure modes in the taxonomy:**
+
+| Mode | What it misses | Example |
+|---|---|---|
+| Quantitative gap (DECISIONS 23) | Calibration of a target numeric | 0.04 dB anchored success band |
+| Structural gap (DECISIONS 20) | A causal factor or decision branch | Missing source (c) image-order RNG |
+| Retrieval gap (DECISIONS 26 addendum) | Concrete repo evidence at authoring time | Source (d) determinism prior when DECISIONS 16 contradicted |
+| Scenario-coverage gap (DECISIONS 27) | Interpretive sub-cases within an enumerated branch | O2 "distinctly negative but not decisive" sub-case |
+| **Single-seed generalization gap (this entry)** | **Recipe-level claims from single-seed data in a context where escalation exists to check single-seed generalization** | **Over-dens "uniform degradation" framing from seed=42 alone** |
+
+The single-seed generalization gap is structurally different from the other four:
+
+- **Not a quantitative gap.** There's no target numeric being anchored. The gap is in a *narrative framing*, not a numeric band.
+- **Not a structural gap.** The decision tree is complete and the escalation rule is correct. The gap is in the interpretive commitment about what the escalation will reveal, not in the enumeration of branches.
+- **Not a retrieval gap.** The author has the relevant data (escalation is in progress or pending); the issue isn't that they failed to grep. The issue is that they made a claim *before* the data existed, about what the data would look like.
+- **Not a scenario-coverage gap.** Scenario-coverage gaps miss sub-cases within an enumerated branch. This gap *commits a specific sub-case* within a branch based on insufficient data, rather than enumerating possible sub-cases. Scenario-coverage is "you didn't list all the sub-cases"; single-seed generalization is "you listed the sub-cases but then committed a specific one prematurely."
+
+**Where single-seed generalization gaps come from.** Pre-escalation observation-time interpretive work is under psychological pressure: the author wants to write the outcome narrative before the full data lands so that observation-time writeup is mechanical rather than creative-under-pressure. This is the whole point of DECISIONS 26's pre-committed templates. But the mechanical writeup requires *structural* framings (which outcome branch applies, which findings go in which subsection) that are robust to whatever the data reveals. The failure mode is when the author accidentally extends the pre-commit to *content* claims that depend on what the data shows, not just structural claims about where those observations go.
+
+In the over-dens "uniform degradation" case, the structural framing was correct (Finding 2 goes in the additional-findings subsection; per-view observations go in a table). The mistake was committing a content claim ("uniform degradation") that was implicitly a recipe-level assertion about all four views based on one seed's worth of data. The structural framing would have been something like: "Finding 2: per-view redistribution pattern for over-dens × dense init. Table 2b fills at observation time from the 3-seed data." The structural framing holds regardless of what the 3 seeds show; the content claim depends on what they show.
+
+**Catch mechanism for single-seed generalization gaps.** For any pre-commit framing that describes what an escalation recipe's output will look like, distinguish:
+
+1. **Structural framings** (where the output goes, which blanks it fills, what classification rule applies). These are safe to pre-commit because they don't depend on the specific observations.
+2. **Content framings** (what the observations say, what patterns they show, what the recipe-level effect is). These are NOT safe to pre-commit before the escalation compute lands, because the escalation exists precisely to measure whether single-seed observations generalize.
+
+The rule: pre-commit templates with structural blanks; do not pre-commit content claims about what the blanks will contain. If a pre-commit framing includes a sentence of the form "The recipe exhibits X" where X is a content claim, and the recipe is escalating, replace it with "Finding 2 [pending escalation data]."
+
+Applied to Day 11's case: instead of pre-committing "over-dens shows uniform degradation across all 4 views" based on seed=42 alone, the pre-commit should have said: "Finding 2b: per-view redistribution pattern for over-dens × dense init. Fill from the 3-seed data at observation time; if all 3 seeds agree within a tight range the pattern is recipe-level; if one or more views show seed-variable behavior, the pattern is seed-conditional and needs recipe-structure decomposition." That framing is robust to whatever the data shows; the Day 11 observation would fall cleanly into the "seed-variable on view 001" case without falsifying the pre-commit.
+
+**Connection to the methodology meta-pattern (DECISIONS 20 → 23 → 24 → 25 → 26 → 27 → 28).**
+
+The taxonomy is now:
+
+1. **Quantitative gap** — anchor on a target numeric that observation falsifies (DECISIONS 23 → 25)
+2. **Structural gap** — miss a causal factor in variance-source enumeration (DECISIONS 20 → 25)
+3. **Retrieval gap** — reason from memory about prior findings without grepping (DECISIONS 26 addendum)
+4. **Scenario-coverage gap** — enumerate branches correctly but miss interpretive sub-cases (DECISIONS 27)
+5. **Single-seed generalization gap** — pre-commit content claims from single-seed data in a context where escalation exists to check single-seed generalization (this entry)
+
+Catch mechanisms:
+  1. Use trigger thresholds instead of target numerics in pre-commits
+  2. Enumerate all causal factors mechanically (e.g., grep every RNG stream)
+  3. Force memory into concrete commands (grep, read, measure)
+  4. Enumerate max and min plausible observations for each branch, not just prior-weighted center
+  5. Distinguish structural framings (safe to pre-commit) from content framings (unsafe to pre-commit before escalation)
+
+The five are complementary, not substitutes. A pre-commit that passes all five is DECISIONS-25-robust by the current taxonomy. A sixth failure mode may surface in future work; the taxonomy is additive.
+
+**Interesting observation about this taxonomy's growth rate.** DECISIONS 20 → 23 → 25 surfaced the first two failure modes across Day 10's work. DECISIONS 26 → 27 → 28 surfaced the next three across Day 11's work. The rate of new failure mode discovery is accelerating, not flattening — each day of methodology-sensitive work surfaces ~1.5 new distinct failure modes. This is NOT evidence that the methodology is getting worse; it is evidence that higher-stakes pre-commits surface more subtle failure modes. Day 9 shipped without a failure-mode taxonomy entry because its methodology surface area was small (single-seed single-run ablation). Day 10 introduced multi-seed and variance reporting, which surfaced two. Day 11 introduced dense-init + cost recalibration + per-recipe escalation + per-view interpretive pre-commits, which surfaced three.
+
+If the trend continues, Day 12's cross-method comparison — which introduces inter-method comparison framings on top of everything Day 11 had — may surface another 1–2 failure modes. The honest posture is: expect them, catch them, catalogue them. Each entry in the taxonomy is a permanent methodology artifact that future work inherits for free. The taxonomy's growth is the return-on-discipline from taking these entries seriously.
+
+**Honest scope of this decision.**
+
+- This entry adds a fifth failure mode to the DECISIONS 25 taxonomy. It does not supersede any prior entry.
+- The catch mechanism (structural-vs-content framing discipline) is a rule for future pre-commit authoring. It is not retroactively applied to preserve DECISIONS 26's pre-commits as written.
+- The Day 11 writeup in README.md already transparently records the 2b correction. This DECISIONS entry catalogues the failure mode as first-class taxonomy; it does not re-describe the specific case beyond the level needed for the motivating example.
+- No methodology contract is changed by this entry. No decisive thresholds, no escalation rules, no outcome templates move. The entry only expands the taxonomy of things to watch for in future pre-commits.
+- The fifth failure mode is not a reason to stop pre-committing interpretive framings. The user's framing discipline (pre-committing writeup structure before data lands to avoid observation-time creative pressure) is correct; this entry refines the discipline by narrowing what kinds of claims are safe to pre-commit vs which need "[pending data]" placeholders.
