@@ -1045,3 +1045,51 @@ Task #3's design work (preflight `preflight/2026-04-14_day12_task3_preflight.txt
 - The specific PSNR-ordering scenarios S_X1, S_X2, S_X3, S_X5 of the committed DECISIONS 29. They are superseded by the revised set above. The revised S_X1, S_X2, S_X3 reuse the same numbering for locality (readers can match original → revised by number) but have different content.
 
 **Connection to the pre-commit discipline.** This amendment lands *before* task #3 compute produces any observation numbers, preserving the pre-commit → observation comparison honesty per DECISIONS 25 and Day 11's Amendment 1 pattern. A reviewer reading the commit chain sees: original DECISIONS 29 → Amendment 1 (factual n=37 correction) → Amendment 2 (scenario revision for option (c)) → task #3 compute → Day 12 writeup. The revision happens in the planning phase, not retroactively after observing numbers.
+
+## 30. Retrieval gap promoted from DECISIONS 26 addendum — four instances across V1.5, one post-commit
+
+**Decision.** Retrieval gap — the pre-commit failure mode where an author reasons from memory about a concrete repo fact when a `grep`/`ls`/`read`/`measure` would resolve it at lower cost and higher reliability — is promoted from an addendum of DECISIONS 26 to a first-class taxonomy entry. The promotion trigger is the fourth instance in the V1.5 chain, which is the first post-commit instance. Cross-references to the origin (DECISIONS 26 "self-catch during consolidation" addendum) preserve commit-chain provenance; standalone entry status gives the pattern visibility proportional to its recurrence frequency.
+
+**Why promote now.** Earlier taxonomy-inflation pushback (the user's guidance on the Y-miss candidate 6th gap and on the first three retrieval-gap instances) set the bar for promotion at either (a) a recurrence with consistent mechanism that produced downstream damage, or (b) count-plus-character evidence strong enough to justify the standalone slot. Four instances is count. The fourth instance is the first to land in a committed writeup (README commit `e8c6846`) before being caught, rather than being caught pre-commit like the first three. That post-commit character is the character evidence: it demonstrates that the retrieval-gap mechanism can produce damage even under the existing discipline, not just that the discipline reliably catches the mechanism. The four-instance count alone would not be enough; the post-commit instance changes the evidentiary character from "this mode recurs and we catch it" to "this mode recurs and has produced at least one post-commit damage event," which is a categorically stronger and more worrying claim.
+
+**The four instances.**
+
+| # | Instance | Classification | Motivating commit or artifact | What was reasoned from memory | What the grep/ls/read would have resolved |
+|---|---|---|---|---|---|
+| 1 | Source (d) determinism prior | pre-commit | DECISIONS 26 "self-catch during consolidation" addendum | "GPU PatchMatch is deterministic at fixed seed" | DECISIONS 16 records 24,322 vs 178 fused points at n=30 under identical seed — explicit non-determinism |
+| 2 | Workspace-contract scaffolding | pre-commit | `modal_app.py` `rerun_dense_mvs` comment block (commit around the Smoke A iterations, Day 11) | "Mirror the cached `dense/` tree by enumerating the specific files I remember pycolmap needs" | A walk-and-copy traversal of the actual cached tree reveals that `patch-match.cfg`, `fusion.cfg`, and the `run-colmap-*.sh` helpers are present alongside what memory suggested |
+| 3 | MVS view count label (n=33 → n=37) | pre-commit | Commit `812929e` (factual correction, DECISIONS 26 Amendment 2 + DECISIONS 29 Amendment 1) | "MVS PatchMatch runs at n=33" (the 3DGS train view count, conflated with the MVS view count) | `modal volume ls simtorecon-workspace scan9_v49_s123_3d428b/dense/images` → 37 .png files; `patch-match.cfg` → 37 entries |
+| 4 | Day 12 Finding 1/2 rediscovery | **post-commit** | Commit `b4e2c7d` (Day 12 correction, landing after `e8c6846`) | "V1's scan9 chamfer baseline is 18.89 mm (the value in `results/baseline_scan9/result.json`, seed=42)" and "SfM-seed variance at the chamfer level is a new Day 12 finding" | `grep -rn "chamfer" results/` surfaces `results/stress_view_count/summary.json` with the full 3-seed sweep (`range_chamfer = 11.69 mm`, per-seed {42: 18.31, 123: 7.35, 7: 19.04}); `grep -n "7.35" README.md` surfaces line 71's "best n=49 run (seed 123, 258k points, chamfer 7.35mm)" callout |
+
+**What the post-commit instance adds beyond the first three.** The first three instances share a structure: the author reached into memory for a concrete fact, the memory was stale or wrong, and someone (either the author in a second pass or another reviewer) caught the mismatch *before* the incorrect claim landed in git. The retrieval-gap catch mechanism — force memory into concrete commands — applied at each catch.
+
+The fourth instance has a different structure. The author reached into memory for "V1's chamfer baseline is 18.89 mm" and "V1 didn't multi-seed characterize SfM variance at the chamfer level," wrote both into a Day 12 writeup draft, reviewed the draft with the user, addressed specific feedback (the option-(c) discussion, the scenario-renumbering question, the MVS-variance-reporting question), and committed it as `e8c6846`. At no point in the draft → review → commit pipeline did the existing catch mechanism fire. The catch fired only during the Day 13 polish re-read, when the author re-read the V1 README section and happened upon the "best n=49 run (seed 123, 258k points, chamfer 7.35mm)" callout at line 71 — which the Day 12 draft had been citing the section around without noticing.
+
+This demonstrates two things that the first three instances did not:
+
+1. **Post-commit damage is reachable under the existing discipline.** The retrieval-gap catch mechanism (force memory into concrete commands) works when the author thinks to use it or when a reviewer notices the mismatch. It does not automatically fire on every committed artifact. If neither the author nor the reviewer has independently prompted the check, a retrieval-gap rediscovery can land in git and stay there until a later pass catches it.
+
+2. **Re-read is a necessary catch mechanism post-commit, not a nice-to-have.** The Day 13 polish re-read was planned as an editorial pass (surface the 5-gap taxonomy, audit honest-scope, budget line). It was not planned as a factual re-verification pass. The fourth retrieval-gap instance was caught anyway because the author re-read enough of the repo to find the mismatch. Absent the re-read, the writeup would have shipped with the rediscovery framings intact. The implication is that a re-read pass is load-bearing for the catch mechanism, not optional polish.
+
+Neither observation is a new operational rule. This entry does not introduce a "require a mandatory factual re-verification pass before every commit" protocol, because that would overpay for a failure mode that fires three times pre-commit and once post-commit across the V1.5 chain. The right posture is the one already implicit in the workflow: catch it where you catch it, log the recurrence, and update the taxonomy as evidence accumulates. This entry is the evidence update.
+
+**Connection to DECISIONS 26 addendum (origin).** DECISIONS 26's "self-catch during consolidation" addendum introduced retrieval gap as the third pre-commit failure mode in the taxonomy (after quantitative and structural), framed as a rule about forcing memory into concrete commands. That addendum is the canonical origin of the retrieval-gap slot; this DECISIONS 30 entry is a promotion rather than a restatement. Readers tracing the taxonomy's provenance should start at DECISIONS 26's addendum and trace forward to this entry for the recurrence inventory and the post-commit-instance evidence.
+
+**Connection to the five-gap taxonomy.** The taxonomy as cataloged through DECISIONS 28 is:
+
+1. Quantitative gap (DECISIONS 23 → 25)
+2. Structural gap (DECISIONS 20 → 25)
+3. Retrieval gap (DECISIONS 26 addendum → this entry)
+4. Scenario-coverage gap (DECISIONS 27)
+5. Single-seed generalization gap (DECISIONS 28)
+
+This entry does not add a sixth slot. The candidate sixth — uncertainty propagation / stated-uncertainty flattening — has two candidate instances (Day 12 Y-refinement miss, Day 12 Open3D wall-clock miss) but neither has produced downstream damage and the taxonomy-inflation guard (internal feedback memory) defers promotion until a third instance or a first instance with downstream damage. Day 13's methodology subsection in `README.md` lists the two candidate instances and the deferred-promotion posture.
+
+**Honest scope of this decision.**
+
+- This is a promotion of an existing taxonomy slot, not a new slot. No new operational rule is introduced.
+- The four instances are inventoried above with commit refs or artifact pointers; the inventory is the primary methodology artifact of this entry.
+- The post-commit character of instance 4 is the key evidence for the promotion. A four-instance all-pre-commit count would not have justified the promotion — the post-commit character is what turns count into character evidence.
+- Re-read passes are now part of the informal catch-mechanism inventory for the retrieval-gap slot. Not a new mandatory protocol; an observation that the re-read caught what the pre-commit discipline did not.
+- The retrieval-gap slot remains one of five (with the sixth as a deferred candidate). This entry does not narrativize the taxonomy or over-frame it as a methodology artifact larger than what it is — a cataloged failure mode with growing instance evidence.
+- The instance evidence strengthens over time if retrieval gap recurs with downstream damage. A fifth instance with damage would be the next update trigger; a fifth pre-commit instance would be cataloged in the DECISIONS 30 table but not trigger a further promotion. A sixth post-commit instance would argue for a stronger intervention (mandatory re-read pass, for example), which is not pre-committed here.
