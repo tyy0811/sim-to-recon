@@ -620,6 +620,180 @@ def dense_mvs_subset(
     }
 
 
+@app.function(
+    image=colmap_image,
+    gpu="A10G",
+    timeout=1800,  # 30 min — dense MVS at moderate view counts (~30 images at 800×600) typically completes in 5-10 min on A10G; cap is generous for larger scenes
+    volumes={VOLUME_MOUNT: workspace_volume},
+)
+def rerun_dense_mvs(
+    colmap_run_id: str,
+    seed: int = 42,
+) -> dict:
+    """Rerun PatchMatch + fusion on an existing undistorted sparse model.
+
+    Loads the existing undistorted sparse model from /workspace/{colmap_run_id}/dense/
+    and runs only the dense MVS stage (PatchMatch photometric → PatchMatch geometric
+    → stereo fusion). Writes the fused PLY to a unique subdirectory so multiple
+    invocations on the same colmap_run_id do not overwrite each other or the
+    cached V1-era fused PLY.
+
+    Initially used by Day 11's source (d) verification protocol per DECISIONS 26
+    (two invocations at the same seed, downstream PSNR comparison via the 0.5 dB
+    gate). The function itself is scene-agnostic — it operates on whatever
+    colmap_run_id is passed and is reusable for future verification experiments
+    on other scenes or view counts. GPU PatchMatch is non-deterministic at the
+    CUDA-thread-scheduling level per DECISIONS 16 — repeated calls at the same
+    seed produce different outputs, which is what the verification protocol
+    measures.
+
+    Settings match modal_app.py's reconstruct_dtu_scan9 dense-MVS stage exactly
+    (lines 270-291) and dense_mvs_subset's dense-MVS stage (lines 577-598):
+        max_image_size = 800
+        num_iterations = 5
+        filter = True (both photometric and geometric passes)
+        fusion min_num_pixels = 3
+    Settings are hardcoded here rather than parameterized to prevent accidental
+    drift between verification runs and any other dense-MVS invocation in the
+    repo. The point of source (d) verification is to measure variance under
+    fixed configuration; parameterizing the settings would defeat that.
+
+    Returns:
+        dict with success, colmap_run_id, seed, rerun_id (unique subdirectory
+        name), n_points, elapsed_seconds, fused_ply_path (workspace-relative),
+        and error. The fused_ply_path can be passed directly to train_gsplat
+        as dense_init_ply_path.
+    """
+    import os
+    import time
+    import uuid
+
+    import pycolmap
+
+    pycolmap.set_random_seed(seed)
+
+    start = time.time()
+    rerun_id = f"dense_rerun_s{seed}_{uuid.uuid4().hex[:8]}"
+    base = f"{VOLUME_MOUNT}/{colmap_run_id}"
+    rerun_dir = f"{base}/{rerun_id}"
+
+    try:
+        # Locate the existing undistorted sparse model + images. Same fallback
+        # candidates as train_gsplat to handle the dense/sparse vs dense/sparse/0
+        # path ambiguity left by pycolmap.undistort_images convention drift.
+        candidates = [
+            (f"{base}/dense/sparse", f"{base}/dense/images"),
+            (f"{base}/dense/sparse/0", f"{base}/dense/images"),
+        ]
+        sparse_path = None
+        images_path = None
+        for sp, ip in candidates:
+            has_cams = (
+                os.path.exists(f"{sp}/cameras.bin")
+                or os.path.exists(f"{sp}/cameras.txt")
+            )
+            if has_cams and os.path.isdir(ip):
+                sparse_path = sp
+                images_path = ip
+                break
+
+        if sparse_path is None:
+            return {
+                "success": False,
+                "colmap_run_id": colmap_run_id,
+                "seed": seed,
+                "rerun_id": rerun_id,
+                "n_points": 0,
+                "elapsed_seconds": time.time() - start,
+                "fused_ply_path": None,
+                "error": (
+                    f"no undistorted sparse model found under {base}/dense/sparse "
+                    f"or fallbacks; reconstruct_dtu_scan9 must have been run for "
+                    f"this colmap_run_id first"
+                ),
+            }
+
+        print(f"[rerun_dense_mvs] sparse: {sparse_path}")
+        print(f"[rerun_dense_mvs] images: {images_path}")
+        print(f"[rerun_dense_mvs] writing to: {rerun_dir}")
+
+        # Build a fresh workspace directory with symlinks to the existing sparse
+        # model + images. PatchMatch reads from {workspace}/sparse + /images and
+        # writes its stereo/ outputs to the workspace. By symlinking sparse +
+        # images into a fresh rerun_dir, PatchMatch reads from the cached V1
+        # locations (via the symlinks) and writes its stereo/ outputs to the
+        # rerun_dir without touching V1's cached state. The cached fused PLY at
+        # {base}/fused.ply (V1 era) and any cached {base}/dense/stereo state are
+        # left untouched.
+        os.makedirs(rerun_dir, exist_ok=True)
+        rerun_sparse = f"{rerun_dir}/sparse"
+        rerun_images = f"{rerun_dir}/images"
+        if not os.path.exists(rerun_sparse):
+            os.symlink(sparse_path, rerun_sparse)
+        if not os.path.exists(rerun_images):
+            os.symlink(images_path, rerun_images)
+
+        # PatchMatch + fusion at hardcoded settings matching reconstruct_dtu_scan9
+        # and dense_mvs_subset (see docstring above for the parity rationale)
+        pm_opts = pycolmap.PatchMatchOptions()
+        pm_opts.max_image_size = 800
+        pm_opts.num_iterations = 5
+        pm_opts.filter = True
+
+        print("[rerun_dense_mvs] PatchMatch (photometric)...")
+        pm_opts.geom_consistency = False
+        pycolmap.patch_match_stereo(workspace_path=rerun_dir, options=pm_opts)
+
+        print("[rerun_dense_mvs] PatchMatch (geometric)...")
+        pm_opts.geom_consistency = True
+        pycolmap.patch_match_stereo(workspace_path=rerun_dir, options=pm_opts)
+
+        print("[rerun_dense_mvs] Stereo fusion...")
+        fused_dir = f"{rerun_dir}/fused"
+        os.makedirs(fused_dir, exist_ok=True)
+        fusion_opts = pycolmap.StereoFusionOptions()
+        fusion_opts.min_num_pixels = 3
+
+        recon = pycolmap.stereo_fusion(
+            output_path=fused_dir, workspace_path=rerun_dir, options=fusion_opts,
+        )
+
+        n_points = len(recon.points3D)
+        print(f"[rerun_dense_mvs] Fused: {n_points} points")
+
+        fused_ply = f"{rerun_dir}/fused.ply"
+        recon.export_PLY(fused_ply)
+
+        elapsed = time.time() - start
+        workspace_volume.commit()
+
+        print(f"[rerun_dense_mvs] complete: {n_points} points in {elapsed:.1f}s")
+
+        return {
+            "success": True,
+            "colmap_run_id": colmap_run_id,
+            "seed": seed,
+            "rerun_id": rerun_id,
+            "n_points": n_points,
+            "elapsed_seconds": elapsed,
+            "fused_ply_path": f"{colmap_run_id}/{rerun_id}/fused.ply",
+            "error": None,
+        }
+
+    except Exception as e:
+        import traceback
+        return {
+            "success": False,
+            "colmap_run_id": colmap_run_id,
+            "seed": seed,
+            "rerun_id": rerun_id,
+            "n_points": 0,
+            "elapsed_seconds": time.time() - start,
+            "fused_ply_path": None,
+            "error": f"{type(e).__name__}: {e}\n{traceback.format_exc()}",
+        }
+
+
 # ---- DTU data download (runs on Modal, fast datacenter internet) ----
 
 download_image = (
