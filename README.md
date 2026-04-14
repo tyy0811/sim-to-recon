@@ -453,52 +453,69 @@ Day 11 measured source-(d) PatchMatch CUDA-thread stochasticity at
 for the MVS cell is uncharacterized, and a 2-run sample would overclaim
 precision relative to the 3DGS row's 3-seed distribution.*
 
-**Finding 1 — Day 11's MVS reconstruction is 2.6× tighter than V1's
-seed=42 baseline, confounded by SfM seed.** V1's own scan9 baseline
-(`results/baseline_scan9/result.json`, run at seed=42) produces 72,122
-fused points and chamfer 18.89 mm. Day 11's `rerun_dense_mvs` on the V1
-best sparse model (`scan9_v49_s123_3d428b`, seed=123 SfM) produces
-257,691 fused points and chamfer 7.35 mm. The 2.6× chamfer improvement
-and 3.6× point-density increase are SfM-seed-driven: both runs use the
-same dense MVS stage with identical settings (num_iterations=5,
-photo+geom filter, min_num_pixels=3), and the difference is upstream
-in SfM-level reconstruction quality at seed=42 vs seed=123. This is not
-a view-count-sensitivity result — the MVS PatchMatch stage runs on the
-same 37 undistorted images in both cases (verified via
-`modal volume ls` and `patch-match.cfg`; see DECISIONS 26 Amendment 2
-for the n=33 → n=37 factual correction).
-
-The S_X3 scenario template pre-committed in DECISIONS 29 Amendment 2
-directly applies: *"Day 11's seed=123 SfM produces a tighter dense
-reconstruction than V1's seed=42 baseline at the same nominal n=49
-subsample; consistent with SfM-seed variance as a reconstruction-quality
-source."*
+**Finding 1 — Day 11's `rerun_dense_mvs` reproduces V1's seed=123 n=49
+result bit-identically; source-(d) variance bound extends to the chamfer
+level.** Day 11's `rerun_dense_mvs` on V1's seed=123 sparse model
+produces bit-identical geometric metrics (chamfer 7.347 → 7.3467, F@5mm
+0.7418 → 0.7418, icp_fitness 0.9590 → 0.9590, points 257,684 → 257,691
+— relative delta <0.003%). This extends Day 11's source-(d) variance
+bound — previously measured only at 0.10 dB on downstream 3DGS PSNR —
+to the chamfer / F-score level at ≤0.003% relative, and validates the
+`rerun_dense_mvs` machinery on geometric metrics. The chamfer value
+itself (7.35 mm) reproduces V1's existing seed=123 best-cell result
+(README line 71 above; `results/stress_view_count/summary.json`, median
+chamfer 18.31 mm, `range_chamfer = 11.69 mm` across seeds {42, 123, 7}
+at n=49) rather than representing a new Day 12 datapoint.
 
 *Gate-trip + diagnostic transparency.* The observed `F@5mm = 0.742`
 landed outside the DECISIONS 29 Amendment 2 committed S_X5 hard-stop
 band `[0.10, 0.50]`, and `chamfer = 7.35 mm` landed inside the pre-report
 diagnostic envelope `[5, 10]` mm. Per the gate discipline, we halted
-before reporting and re-ran the eval pipeline on V1's own
-`results/baseline_scan9/dense.ply` to verify reproduction of V1's 18.89
-mm anchor. Result: bit-tight reproduction at ≤0.01% relative error across
-all seven metrics (chamfer 18.8913 vs 18.89, F@1mm 0.0445 vs 0.0445,
-icp_fitness 0.7052 vs 0.7052). The gate trip is resolved as a legitimate
-S_X3 observation, not a pipeline artifact. Diagnostic artifacts at
+before reporting and re-ran the eval pipeline on V1's
+`results/baseline_scan9/dense.ply` (seed=42) to verify pipeline
+reproduction of V1's 18.89 mm anchor. Result: bit-tight reproduction at
+≤0.01% relative error across all seven metrics (chamfer 18.8913 vs
+18.89, F@1mm 0.0445 vs 0.0445, icp_fitness 0.7052 vs 0.7052). The gate
+trip is resolved as a pipeline-consistent observation, not a measurement
+drift — but the *reason* the observation fell outside the committed
+envelope is that the envelope was anchored on
+`results/baseline_scan9/result.json` (seed=42 only, chamfer 18.89 mm),
+not on V1's full n=49 stress sweep which already contained the seed=123
+best cell at chamfer 7.35 mm. That anchor-choice error is the
+retrieval-gap root cause covered in the transparent rediscovery
+correction below. Diagnostic artifacts at
 `preflight/day12_mvs_eval/day12_diagnostic_result.json` (preflight/ is
 gitignored scratch).
 
-**Finding 2 — V1's scan9 chamfer baseline is SfM-seed-sensitive.**
-V1's 18.89 mm anchor at seed=42 was implicitly treated as "the" scan9
-MVS baseline across all prior V1 → V1.5 writing. The diagnostic rerun
-confirms V1's eval pipeline is stable (the 18.89 number reproduces
-exactly), but a different SfM seed against the same scene produces a
-2.6× better chamfer. This constrains future V1-pipeline comparisons:
-any cross-method or cross-regime comparison that uses V1's chamfer
-anchor should account for SfM-seed-level variance, which at scan9 is
-large enough (>10 mm on chamfer in the V1 eval scale) to dominate
-view-count or method-level effects. Characterizing SfM-seed variance
-as its own axis (multi-seed V1 reconstructions, chamfer distribution)
-is out of V1.5 scope; recorded here as a methodology finding.
+**Finding 2 — retracted.** An earlier draft framed V1's chamfer
+SfM-seed sensitivity as a new Day 12 finding; it is not. V1's n=49
+stress sweep already reports `range_chamfer = 11.69 mm` across seeds
+{42, 123, 7} (`results/stress_view_count/summary.json`), and the
+README's n=49 variance table + "best n=49 run (seed 123, 258k points,
+chamfer 7.35mm)" callout at line 71 already surface the same SfM-seed
+variance. The "standalone finding" framing was a retrieval-gap
+rediscovery; see the transparent rediscovery correction below.
+
+*Transparent rediscovery correction (added during Day 13 polish
+re-read, commit lands after `e8c6846`).* The first committed draft of
+the Day 12 writeup framed Day 11's 7.35 mm chamfer as "2.6× tighter
+than V1's baseline" (Finding 1) and V1's SfM-seed chamfer variance as
+a new methodology finding (Finding 2). Both framings are retrieval-gap
+rediscoveries. V1's stress sweep at
+`results/stress_view_count/summary.json` already reports the full
+3-seed n=49 chamfer distribution (median 18.31, range 11.69, per-seed
+{42: 18.31, 123: 7.35, 7: 19.04}), and the README at line 71 explicitly
+names the seed=123 7.35 mm best cell. Day 11's rerun reproduces V1's
+seed=123 best cell, which V1 had already measured and surfaced. The
+catch happened during Day 13's polish re-read pass — specifically during
+a re-read of the V1 "Reconstruction quality vs view count" section that
+turned up the "best n=49 run (seed 123, 258k points, chamfer 7.35mm)"
+callout on line 71. This is the fourth retrieval-gap instance in the
+V1.5 chain and the first post-commit instance; prior three were all
+caught pre-commit. See [DECISIONS.md](DECISIONS.md) entry 30 for the
+full recurrence inventory and the promotion from the DECISIONS 26
+addendum to a standalone taxonomy entry on the strength of the four
+instances including the post-commit one.
 
 **Finding 3 — 3DGS rows reuse Day 10 multi-seed anchors.** The Day 12
 table is a cross-method assembly, not a fresh 3DGS experiment. The
@@ -516,16 +533,21 @@ PSNR for cross-method reporting.
 in a distinct way:
 
 - **COLMAP MVS at n=37 × seed=123 SfM**: V1-pipeline chamfer 7.35 mm,
-  F@5mm 0.742. The method produces a competent reconstruction on V1's
-  internal eval scale — which is itself 10× looser than DTU benchmark
-  SOTA because the pipeline uses Open3D ICP alignment rather than the
-  DTU official mask-aware Matlab evaluator (see Honest Scope below).
-  The interesting observation is not that MVS "beats" anything — the
-  cross-method framing precludes that — but that the MVS reconstruction
-  quality at this scene is dominated by an unexpected source: SfM-seed
-  variance at the sparse-model level. What prior V1 → V1.5 writing
-  read as "scan9 + V1 pipeline = chamfer ~18 mm" is actually
-  "scan9 + V1 pipeline + seed=42 = 18 mm; seed=123 = 7 mm."
+  F@5mm 0.742, bit-identical to V1's existing seed=123 n=49 best-cell
+  datapoint (see Finding 1 and the transparent rediscovery correction
+  above). Day 12's MVS cell is a reuse of V1's best-seed datapoint as
+  the cross-method reference, extending source-(d) variance bound to
+  the chamfer level (≤0.003% relative) as a bonus. The failure mode
+  at the cross-method level is *missing geometry*: V1's n=49 stress
+  sweep reports `range_chamfer = 11.69 mm` across {42, 123, 7},
+  dominated by SfM-seed variance at the sparse-model level (V1's
+  "best n=49" seed is 2.6× tighter than its median seed), and the V1
+  eval pipeline is itself 10× looser than DTU benchmark SOTA because
+  it uses Open3D ICP alignment rather than the DTU official mask-aware
+  Matlab evaluator (see Honest Scope). At this scene + view-count +
+  eval-pipeline regime, MVS reconstruction quality is dominated by the
+  SfM input's seed-level variance, and any single-seed MVS anchor
+  overstates the precision of the pipeline.
 
 - **Frozen 3DGS at 9k init**: multi-seed PSNR 21.32 ± 1.53 dB,
   capacity-fixed at N=9,044. The model under-fits because 9k Gaussians
@@ -549,10 +571,11 @@ in a distinct way:
   init-density level.
 
 The cross-method comparison is the three-regime mechanism taxonomy,
-not a single-metric horse race: missing geometry (MVS's SfM-seed
-fragility at the V1 eval scale), under-fit (frozen capacity limit),
-and over-fit pixel noise (over-dens recipe miscalibration). Each
-failure mode is traceable to a mechanism documented in prior DECISIONS
+not a single-metric horse race: missing geometry (MVS's SfM-seed-driven
+sparse-model quality, characterized by V1's stress sweep at
+`range_chamfer = 11.69 mm`), under-fit (frozen capacity limit), and
+over-fit pixel noise (over-dens recipe miscalibration). Each failure
+mode is traceable to a mechanism documented in prior V1 or DECISIONS
 entries, and none are resolved by more init density or more views at
 this scene + V1-pipeline regime.
 
@@ -562,13 +585,14 @@ this scene + V1-pipeline regime.
   PSNR." No such comparison is made — MVS has no PSNR column and 3DGS
   has no chamfer column under the option (c) rendering decision.
 - Not "COLMAP MVS at n=37 is competitive with DTU SOTA." V1's internal
-  eval pipeline is benchmark-loose by an order of magnitude; Day 11's
-  7.35 mm chamfer would remain ~10× SOTA under the DTU official
-  mask-aware evaluator.
-- Not "SfM-seed variance is a method-level finding about COLMAP."
-  The finding is about V1's internal eval pipeline's sensitivity to
-  upstream SfM input quality; it would apply to any method consuming
-  an SfM sparse model as input.
+  eval pipeline is benchmark-loose by an order of magnitude; V1's
+  seed=123 7.35 mm chamfer would remain ~10× SOTA under the DTU
+  official mask-aware evaluator.
+- Not a new SfM-seed variance finding. V1's n=49 stress sweep
+  (`results/stress_view_count/summary.json`) already reports
+  `range_chamfer = 11.69 mm` across seeds {42, 123, 7}. Day 12's MVS
+  cell reuses V1's seed=123 datapoint; no new SfM-seed variance was
+  measured by Day 12.
 - Not a V1.5 headline shift. The V1.5 headline remains within-3DGS
   densification (DECISIONS 21, narrowed at Day 11 to "frozen advantage
   narrows but survives at 257k"). Cross-method results are supporting
