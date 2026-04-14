@@ -35,6 +35,15 @@ dev = [
     "pytest>=7.4",
     "pytest-cov>=4.1",
     "ruff>=0.4.0",
+    # scikit-image is needed by tests/test_perceptual.py's SSIM tests.
+    # The SSIM function in src/simtorecon/evaluation/perceptual.py imports
+    # skimage lazily, so the runtime dep is optional — but CI runs the SSIM
+    # tests, and the module docstring explicitly commits to "PSNR/SSIM
+    # portions should pass in CI environments without torch." Including
+    # skimage here honors that commitment. Full neural extras (torch + lpips)
+    # remain in [neural] and are not installed in CI — LPIPS tests skip
+    # gracefully via importlib.util.find_spec guards.
+    "scikit-image>=0.22",
 ]
 
 [tool.setuptools.packages.find]
