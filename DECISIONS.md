@@ -732,3 +732,78 @@ DECISIONS 20 named the wrong variance sources (structural gap). DECISIONS 23 anc
 - Variance source enumeration is best-effort. Sources (a)–(c) come directly from Day 10; source (d) is a known stochasticity source from V1 (DECISIONS 16) whose magnitude at n=33 is gated on the verification above. If a fifth source surfaces during verification or the seed=42 smoke, DECISIONS 26 needs revisiting *before* escalation, not after.
 - Source (d) verification covers COLMAP dense-MVS *PSNR-impact magnitude at n=33* only. It does not cover whether the specific COLMAP threshold settings produce any particular point count — n_points is observed, not pre-committed (see scope correction in the "What this is NOT" section above).
 - This decision does not pre-commit what happens if `rerun_dense_mvs` cannot reliably produce a usable dense init (PatchMatch crashes mid-run, fusion produces fewer than ~1000 points, or both verification runs degenerate to near-empty outputs). The fallback per the post-Day-9 plan's spirit: document the attempt in the preflight + writeup, ship Day 9 headline with explicit "dense-init bounding not achieved, framework preserved for future work" caveat. That's a Day 11 execution contingency, not a DECISIONS 26 contingency.
+
+## 27. Day 11 Step 9 N_final band override — documented, not retroactively rewritten
+
+**Event (2026-04-14).** Step 9 (over-dens × seed=42 × init A, 7000 iters, dense init at N=257,687) ran successfully to completion and produced an over-dens PSNR median of 15.354 dB. All pre-committed Phase 2 acceptance bands cleared EXCEPT N_final: the observed value 1,545,441 fell outside the pre-committed band [800,000, 1,300,000] by +19% above the upper bound. Preflight Section 5 Phase 2 language was ambiguous about whether band trip constitutes "failure" halting escalation, so the execution halted at Step 9 and reported to the user for direction.
+
+**Decision.** Override the N_final band trip and proceed to escalation (over-dens only; frozen resolved decisive at Δ ≈ −4.05 dB per DECISIONS 26). The override is documented as a first-class methodology event in this DECISIONS entry rather than laundered as a retroactive band widening in the preflight. The distinction matters: retroactive widening corrupts the pre-commit record by making the band match observations post-hoc, obscuring the fact that a band trip occurred. Documented override preserves the pre-commit exactly as written and records the override event + rationale + lessons as first-class methodology.
+
+**Override rationale (all four must hold for the override to be valid):**
+
+1. **Band scope was known-limited at authoring time.** The preflight's Phase 2 language was explicit: *"N final in [800k, 1300k] (over_dens densification produces ~1M Gaussians on Day 10; on a denser init the count may differ but should land in this order of magnitude)."* The band was calibrated against Day 10 sparse-init over-dens's 1,093,077 Gaussians with no empirical anchor for dense-init over-dens. The authors (me) flagged the uncertainty explicitly but committed to the tight numeric band anyway. 1,545,441 is inside "the same order of magnitude as ~1M" by any reasonable reading; the specific tight numeric band was a pre-commit coverage gap, not a well-founded methodology contract.
+
+2. **All other Phase 2 bands cleared.** PSNR median 15.35 ∈ [10, 30] ✓. SSIM median 0.862 ∈ [0.5, 0.95] ✓. LPIPS median 0.142 ∈ [0.05, 0.5] ✓. Wall-clock 395.2s < 900s ✓. success=True ✓. The single band trip was the tight N_final guess, not a methodology violation across the full acceptance surface.
+
+3. **Growth-self-regulation is a substantive mechanism finding that explains the trip non-pathologically.** Day 10 sparse over-dens grew 9,044 → 1,093,077 (121× growth). Step 9 dense over-dens grew 257,687 → 1,545,441 (6.0× growth). Final N ratio: 1.55M / 1.09M = 1.42× despite 28.5× higher starting N. Dense init substantially self-regulates default densification at scan9 scale — the densification machinery doesn't multiply proportionally from a larger base; it grows to approximately the same total magnitude regardless of starting point. This is a real mechanism observation about gsplat default-densification dynamics, not a sign of pathological behavior. The 1.55M end-N is inside "growth-self-regulated dense-init over-dens" regime, which is a new regime the preflight's band-at-authoring-time did not anticipate.
+
+4. **The PSNR value is plausible and informative.** Δ_overdens = 15.354 − 18.90 = −3.55 dB. This is inside DECISIONS 26's over-dens escalation band [-4.0, +4.0] dB, triggering escalation per the pre-commit rule. The value is not a degenerate output; it is a substantive measurement that feeds outcome 3 classification (frozen decisive, over-dens escalated).
+
+**What the override does NOT establish.**
+
+- It does NOT set a precedent that "N_final bands are always overridable." Each future band trip is evaluated on its own merits against the four criteria above. The criteria are load-bearing: known-limited scope, other bands clear, substantive mechanism explanation, plausible observation. If any of the four fails, the default is stop-and-redesign, not override.
+- It does NOT rewrite the preflight's Phase 2 band to [800k, 1,600k] or similar. The band stays as written.
+- It does NOT change DECISIONS 26's methodology contract. Thresholds, outcome templates, source (d) gate, and escalation rule are all unchanged.
+
+**What the override DOES establish.**
+
+- A worked example of the override pattern for future reference. When a pre-commit band is tripped AND the four criteria hold, the override mechanism is: (a) write a DECISIONS entry with the four-criterion analysis, (b) record the lesson about the gap, (c) proceed with the decision the override authorizes. The four criteria are the template.
+- A methodology data point for Section 6.5's scenario-coverage gap catalogue (below).
+- Authorization to proceed with Step 11 escalation using the Step 9 over-dens PSNR as the seed=42 anchor for the over-dens recipe.
+
+**Scenario-coverage gap — fourth pre-commit failure mode for the DECISIONS 25 taxonomy.**
+
+The DECISIONS 25 taxonomy previously catalogued three pre-commit failure modes:
+  1. **Structural gap** (Gap 2 in DECISIONS 25): missing variance source in enumeration. Example: DECISIONS 20 missed source (c) image-order RNG.
+  2. **Quantitative gap** (Gap 1 in DECISIONS 25): anchoring on a single-point-estimate target band that observation falsifies. Example: DECISIONS 23's "0.04 dB target" anchoring.
+  3. **Retrieval gap** (DECISIONS 26 self-catch addendum): reasoning from memory about prior repo findings without grepping the file. Example: DECISIONS 26's original source (d) determinism prior (corrected pre-commit).
+
+Day 11 Step 9 surfaced a fourth distinct failure mode:
+
+  4. **Scenario-coverage gap**: pre-committed enumeration of outcomes had interpretive gaps even though threshold logic was complete. Example: preflight Section 6.5's O2 scenario framing ("over-dens inside escalation band") assumed sub-cases (a) "close to anchor" or (b) "slightly positive," but the actual observation landed in sub-case (c) "distinctly negative but not decisive" — a sub-case the enumeration missed despite the |Δ| < 4.0 dB threshold logic being complete and correct.
+
+**Distinguishing scenario-coverage gaps from the other three:**
+
+- **Not a structural gap.** Structural gaps miss an entire causal factor (a variance source, a confound, a branch of the decision tree). Scenario-coverage gaps miss interpretive sub-cases WITHIN an already-enumerated branch — the decision tree is complete, the interpretive enumeration inside a branch is incomplete.
+- **Not a quantitative gap.** Quantitative gaps anchor on a target numeric that observation falsifies. Scenario-coverage gaps do not have target numerics at all; they have narrative framings for decision-tree branches, and the gap is in the narrative coverage, not the numeric calibration.
+- **Not a retrieval gap.** Retrieval gaps miss concrete evidence that was in the repo at authoring time. Scenario-coverage gaps miss a sub-case in the space of plausible observations — there may have been no concrete repo evidence at authoring time to catch it; the miss is in the author's enumeration of plausible-given-priors.
+
+**Where scenario-coverage gaps come from.** The author enumerates outcome framings based on their directional prior about where observations will land. The prior is often implicit and skews the enumeration toward "likely" sub-cases, leaving "unlikely but still-inside-threshold" sub-cases uncovered. In Section 6.5's O2 case, my implicit prior was that over-dens at dense init would either be close to zero (rescue) or slightly positive (partial rescue) — I was not seriously considering "distinctly negative but not decisive" because I was anchored on the "dense init is roughly neutral for over-dens" hypothesis. The threshold logic was complete; the narrative enumeration was not.
+
+**Catch mechanism for scenario-coverage gaps.** For each outcome branch in the decision tree, list the maximum and minimum plausible observations compatible with the branch. If the narrative framings cover only part of that range, enumerate the uncovered sub-ranges explicitly even if they feel unlikely. For O2 (|Δ_overdens| ∈ [−4, +4] dB), the range is a 8 dB window. My enumeration covered ~[−2, +2] dB and left the tails uncovered. Explicit enumeration would have caught this before observation.
+
+**Connection to methodology meta-pattern.** The four-failure-mode taxonomy is:
+
+  | Failure mode | What it misses | Example |
+  |---|---|---|
+  | Structural gap | a causal factor or decision branch | DECISIONS 20 → source (c) |
+  | Quantitative gap | calibration of a target numeric | DECISIONS 23 → 0.04 dB anchor |
+  | Retrieval gap | concrete repo evidence at authoring time | DECISIONS 26 → source (d) determinism |
+  | Scenario-coverage gap | interpretive sub-cases within an enumerated branch | DECISIONS 27 → O2 sub-case (c) |
+
+Each failure mode has a distinct catch mechanism:
+  - Structural: enumerate all causal factors mechanically (e.g., grep every RNG stream)
+  - Quantitative: avoid target numerics in pre-commits; use trigger thresholds instead
+  - Retrieval: force memory into concrete commands (grep, read, measure)
+  - Scenario-coverage: enumerate the max and min plausible observations for each decision-tree branch, cover the full range not just the prior-weighted center
+
+These are complementary, not substitutes. A pre-commit that passes all four is DECISIONS-25-robust by the current-as-of-Day-11 taxonomy. A fifth failure mode may surface in future work; the taxonomy is additive.
+
+**Honest scope of this decision.**
+
+- This entry authorizes proceeding to Step 11 escalation with the Step 9 over-dens PSNR as the anchor. It does not authorize anything beyond that.
+- The four-criteria override mechanism is a template for future band trips, not a general-purpose escape hatch for pre-commit friction. Future overrides must show all four criteria hold and must be documented as separate DECISIONS entries.
+- The scenario-coverage gap taxonomy expansion applies retroactively to the DECISIONS 25 catalogue as a fourth failure mode. It does not invalidate or supersede any prior entry; it adds a classification dimension.
+- This entry does not pre-commit how future dense-init experiments should calibrate N_final bands. Recipe-specific calibration probes (queued as a Day 12 prerequisite for timing; extendable to N_final calibration) are the operational mitigation, but the specific probe design is not pre-committed here.
+
+**Precedent value.** If future work runs into pre-commit friction from a tight acceptance band on an uncalibrated metric, the pattern is: document the band trip, evaluate the four criteria, write the DECISIONS entry, and proceed (or stop, if any criterion fails). The override mechanism exists because pre-commit discipline cannot be *so* strict that any band trip halts progress regardless of context — that would create a perverse incentive to write intentionally loose bands. Strict bands + documented override is a better equilibrium than loose bands without review, because the override forces explicit analysis of the trip rather than ignoring it.
