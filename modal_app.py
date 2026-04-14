@@ -718,20 +718,59 @@ def rerun_dense_mvs(
         print(f"[rerun_dense_mvs] writing to: {rerun_dir}")
 
         # Build a fresh workspace directory with symlinks to the existing sparse
-        # model + images. PatchMatch reads from {workspace}/sparse + /images and
-        # writes its stereo/ outputs to the workspace. By symlinking sparse +
-        # images into a fresh rerun_dir, PatchMatch reads from the cached V1
-        # locations (via the symlinks) and writes its stereo/ outputs to the
-        # rerun_dir without touching V1's cached state. The cached fused PLY at
-        # {base}/fused.ply (V1 era) and any cached {base}/dense/stereo state are
-        # left untouched.
+        # model + images, plus a fresh stereo/ directory pre-populated with the
+        # cached patch-match.cfg and fusion.cfg. PatchMatch reads from
+        # {workspace}/sparse + /images + /stereo/patch-match.cfg, and writes its
+        # depth/normal/consistency maps to {workspace}/stereo/. By symlinking
+        # sparse + images into a fresh rerun_dir, PatchMatch reads from the
+        # cached V1 locations (via the symlinks) and writes its stereo/ outputs
+        # to the rerun_dir without touching V1's cached state.
+        #
+        # The .cfg files are required because pycolmap.patch_match_stereo and
+        # pycolmap.stereo_fusion both read existing config files from the
+        # workspace's stereo/ subdirectory. These files are normally created by
+        # pycolmap.undistort_images during the dense pipeline setup. Since we
+        # are NOT running undistort_images here (the cached dense/ already has
+        # undistorted sparse + images), we copy the cfg files over from the
+        # cached dense/stereo/. We do NOT copy the depth/normal/consistency map
+        # subdirectories — PatchMatch creates those fresh, which is the whole
+        # point of the rerun. patch-match.cfg references images by basename
+        # relative to {workspace}/images/, so the copy works as-is — PatchMatch
+        # resolves basenames against the rerun_dir's symlinked images/, which
+        # transitively reaches the cached undistorted images. No path rewriting
+        # needed.
+        import shutil
         os.makedirs(rerun_dir, exist_ok=True)
         rerun_sparse = f"{rerun_dir}/sparse"
         rerun_images = f"{rerun_dir}/images"
+        rerun_stereo = f"{rerun_dir}/stereo"
         if not os.path.exists(rerun_sparse):
             os.symlink(sparse_path, rerun_sparse)
         if not os.path.exists(rerun_images):
             os.symlink(images_path, rerun_images)
+        os.makedirs(rerun_stereo, exist_ok=True)
+        cached_dense_dir = f"{base}/dense"
+        for cfg_name in ("patch-match.cfg", "fusion.cfg"):
+            cached_cfg = f"{cached_dense_dir}/stereo/{cfg_name}"
+            rerun_cfg = f"{rerun_stereo}/{cfg_name}"
+            if not os.path.exists(cached_cfg):
+                return {
+                    "success": False,
+                    "colmap_run_id": colmap_run_id,
+                    "seed": seed,
+                    "rerun_id": rerun_id,
+                    "n_points": 0,
+                    "elapsed_seconds": time.time() - start,
+                    "fused_ply_path": None,
+                    "error": (
+                        f"required dense-MVS config file not found at {cached_cfg}; "
+                        f"the cached dense/ workspace is missing files normally created "
+                        f"by pycolmap.undistort_images. rerun_dense_mvs cannot proceed "
+                        f"without copying these files into the fresh workspace."
+                    ),
+                }
+            if not os.path.exists(rerun_cfg):
+                shutil.copy(cached_cfg, rerun_cfg)
 
         # PatchMatch + fusion at hardcoded settings matching reconstruct_dtu_scan9
         # and dense_mvs_subset (see docstring above for the parity rationale)
