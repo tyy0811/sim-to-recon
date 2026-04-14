@@ -739,7 +739,7 @@ same evaluation philosophy to defect detection under sensor shift.
 
 ## Engineering
 
-- **Tests**: 30 pytest (metrics, alignment, DTU loader, COLMAP runner, sweep schemas, failure regions) + 8 GoogleTest (calibration accuracy, corner detection, JSON serialization, edge cases)
+- **Tests**: 40 pytest (chamfer / accuracy / F-score / alignment / failure regions, perceptual PSNR / SSIM / LPIPS, DTU loader, COLMAP runner rotation + workspace, sweep schemas, pipeline smoke) + 8 GoogleTest (calibration accuracy, corner detection, JSON serialization, edge cases)
 - **CI**: ruff lint, pytest, CMake build + ctest on each push
 - **Modal infrastructure**: deployed as `simtorecon-mvs` with persistent volumes (`simtorecon-dtu-data` caches scan9; `simtorecon-workspace` holds per-run artifacts). Feature extraction + SfM + PatchMatch + fusion run on A10G
 - **Sweep is resumable**: each (view_count, seed) run writes its own JSON cache under `results/stress_view_count/views_NNN/seed_SS/result.json`. If a run fails or is interrupted, re-running the sweep script skips completed entries. Critical for multi-seed experiments where individual GPU runs can fail non-deterministically
@@ -761,7 +761,7 @@ make build      # builds the C++ calibration binary
 make baseline   # runs a single n=49 reconstruction on Modal GPU (~10 min)
 make stress     # runs the 3-seed view-count sweep on Modal GPU (~90 min, 12 runs)
 make figures    # generates variance scatter + failure gallery + contrast figure
-make test       # runs pytest (30 tests) + ctest (8 GoogleTest cases)
+make test       # runs pytest (40 tests) + ctest (8 GoogleTest cases)
 ```
 
 **Requires** a Modal account (`pip install modal && modal setup`) and ~$1 of
