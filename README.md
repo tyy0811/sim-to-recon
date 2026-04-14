@@ -40,6 +40,26 @@ single-seed with `set_random_seed`) to the current multi-seed report — is
 documented in [DECISIONS.md](DECISIONS.md) entries 14–16. That path is the
 judgment this repo is trying to show.
 
+**V1.5 — gsplat 3DGS at scan9's 9k sparse init: densification is net-negative
+for PSNR and the failure mode is calibration.** Six recent sparse-view 3DGS
+papers attribute sparse-view failure to "uncontrolled densification" and
+benchmark against vanilla 3DGS. None publish the direct ablation — what
+happens if you disable densification entirely. The V1.5 four-row ablation
+(DECISIONS 21) runs that experiment and finds the frozen baseline
+(densification OFF) beats every densified recipe on PSNR at scan9's 9k SfM
+init. Mechanism: gsplat's default `grow_grad2d=2e-4` is calibrated for
+~100k–200k-point inits; at 9k it fires on 82% of Gaussians per refinement
+event (vs calibration target ~5–15%), over-parameterizes to ~1M Gaussians,
+and drives per-pixel noise that hurts PSNR while preserving perceptual
+metrics. The finding extended across:
+
+- **Day 10 3-seed multi-seed sweep** — frozen 21.32 dB median (seed range 1.53 dB); over-dens 18.50 dB median (seed range 3.19 dB).
+- **Day 11 dense-init bounding** — frozen vs over-dens PSNR advantage narrows from 3.66 dB (9k init) to 2.34 dB (257k init) but does not reverse. Regime-dependence boundary preserved; crossover point not characterized.
+- **Day 12 cross-method three-regime frame** — COLMAP MVS on geometric metrics, 3DGS on novel-view synthesis metrics, dashes in non-applicable cells (no forced apples-to-apples). V1.5 headline is within-3DGS densification; cross-method is supporting finding.
+- **Day 13 five-gap pre-commit authoring taxonomy** — quantitative / structural / retrieval / scenario-coverage / single-seed generalization, each catalogued in a DECISIONS entry with a git-traceable motivating example. Retrieval gap recurred 4× across V1.5 including one post-commit catch during the polish re-read that produced this text. A candidate sixth (*stated-uncertainty flattening*) is held in evidence pending either a third instance or a first instance with downstream damage.
+
+The taxonomy is the V1.5 methodology artifact. See `## V1.5: 3DGS Densification Ablation` below for the full writeup and `## V1.5: 3DGS Densification Ablation` → `### Pre-commit failure modes catalogued` for the taxonomy subsection.
+
 ## Problem
 
 Dense multi-view stereo (MVS) reconstructs 3D geometry from multiple
@@ -58,6 +78,7 @@ the pipeline loses geometry, not just *how much*.
 2. **Calibrate:** Standalone C++17/OpenCV-C++ binary for sensor onboarding
 3. **Evaluate:** Chamfer distance, accuracy, completeness, F-score against DTU GT
 4. **Stress:** View-count reduction with per-point failure analysis
+5. **V1.5 extension:** 3DGS (gsplat) densification ablation on the same scene, frozen baseline vs default-densification recipes, multi-seed variance reporting, and a cross-method three-regime frame against COLMAP MVS. See `## V1.5: 3DGS Densification Ablation` below.
 
 ## Results
 
