@@ -892,3 +892,68 @@ If the trend continues, Day 12's cross-method comparison — which introduces in
 - The Day 11 writeup in README.md already transparently records the 2b correction. This DECISIONS entry catalogues the failure mode as first-class taxonomy; it does not re-describe the specific case beyond the level needed for the motivating example.
 - No methodology contract is changed by this entry. No decisive thresholds, no escalation rules, no outcome templates move. The entry only expands the taxonomy of things to watch for in future pre-commits.
 - The fifth failure mode is not a reason to stop pre-committing interpretive framings. The user's framing discipline (pre-committing writeup structure before data lands to avoid observation-time creative pressure) is correct; this entry refines the discipline by narrowing what kinds of claims are safe to pre-commit vs which need "[pending data]" placeholders.
+
+## 29. Day 12 cross-method three-regime frame — pre-commit before compute
+
+**Decision (pre-commit form, written before any Day 12 compute or rendering-function implementation):** Day 12's cross-method comparison at DTU scan9 + n=33 is framed as three methods each intentionally off-calibration relative to its own happy regime. The three cells of the comparison table — COLMAP MVS at n=33, frozen 3DGS at 9k init, over-dens 3DGS at 9k init — are not a horse-race; they are a characterization of three distinct failure modes at a scene + view-count combination where no method is in its calibration zone. The framing commits the interpretation before numbers land, so observation-time writeup is mechanical rather than creative-under-pressure (per DECISIONS 26's pre-committed-templates discipline).
+
+**Why three regimes and not two.** Post-Day-9 V1.5's framing (README lines 407–413; DECISIONS 21 closing paragraph) collapsed the cross-method contrast into two buckets: classical dense MVS at scan9's view count (loses geometry) and neural splatting at scan9's init density (over-parameterizes OR under-fits depending on recipe). That framing was written when the only gsplat evidence was Day 9's four-row ablation + Day 10's sparse-init multi-seed, all at 9k init. It treated "neural splatting" as one bucket failing in one of two mutually-exclusive modes.
+
+Day 11's dense-init bounding experiment enriched the frame. Two pieces of evidence argue against the two-regime collapse:
+
+1. **Per-view redistribution is recipe-specific at every init density.** At dense init, frozen is asymmetric (view 014 collapses 8 dB, views 028 and 041 gain) while over-dens is seed-sensitive on view 001 (7.60 dB range across 3 seeds) and consistently degraded on view 028 (0.43 dB range). Collapsing these into "neural splatting" hides a mechanism difference that is observable even at fixed init density.
+2. **Dense init does not rescue either recipe.** Frozen's PSNR advantage over over-dens narrows from +3.66 dB at sparse init to +2.34 dB at dense init — narrowing, not reversal. Over-dens at 257k is worse than sparse-init over-dens on all three metrics AND worse than frozen at both init densities. The miscalibration is at the recipe level, not the init-density level.
+
+Day 11 did not just bound the V1.5 PSNR headline. It enriched the cross-method framing by showing that the "neural splatting" bucket should be split along the recipe axis because the two recipes' failure mechanisms are structurally different rather than two points on a continuum. This entry documents that upgrade.
+
+**The three regimes.**
+
+| Regime | Calibration context | Off-calibration in what way | Expected failure mode |
+|---|---|---|---|
+| COLMAP MVS at n=33 | DTU standard protocol uses ~49 views; V1 bimodal cliff at n≤15 (DECISIONS 21, README line 161); V1 stress point at n=30 with ~100× point count variance (DECISIONS 16); Day 11 measured n=33 source-(d) variance at 0.10 dB (frozen, scan9) | Above V1's stress regime (n=33 > n=30 > n=15), below DTU's full-protocol comfort zone (n=33 < n=49) | Loses geometry to under-covered held-out regions; thinner PatchMatch point density → rendering holes → PSNR hurt more than SSIM/LPIPS |
+| Frozen 3DGS at 9k init | gsplat's `grow_grad2d=2e-4` default is calibrated against sparse inits at ~100k–200k points (DECISIONS 21). Scan9's 9,044-point init is ~15× sparser than the calibration target. "Frozen" recipe disables densification (holds capacity at whatever init supplies) | Under-init: 9k Gaussians covering a 479k-pixel image, ~53 pixels per Gaussian vs gsplat's calibrated ~5 pixels per Gaussian | Under-fits because 9k Gaussians cannot represent scan9's sub-pixel detail; L1-loss best-fit low-frequency approximation |
+| Over-dens 3DGS at 9k init | Same 9k init (15× sparser than gsplat's target). Default densification enabled. At scan9 + 9k, the 2e-4 gradient threshold fires on 82% of Gaussians per event vs the calibration regime's ~5–15% (DECISIONS 21 mechanism). Day 11 extended the finding to dense init: over-dens at 257k still over-grows to ~1.55M (DECISIONS 27 growth self-regulation) | Recipe-level miscalibration: the default densification threshold is mis-matched to the sparse-init per-Gaussian gradient statistics | Over-parameterizes to ~1M Gaussians; per-pixel rendering noise (18–32/256 RMSE per DECISIONS 21) hurts PSNR but preserves feature-space metrics |
+
+**What this pre-commit is NOT.**
+
+- Not a compute plan. Task #3 writes its own preflight with execution details. This entry gates the *writeup*, not the compute.
+- Not a claim about method quality outside scan9 + n=33. The framing is scoped to this scene + view-count combination only.
+- Not a claim about gsplat at its calibrated regime (~100k+ SfM points). V1.5 never tested that; all gsplat data is from under-init.
+- Not a claim about COLMAP at its full-protocol regime (n=49). V1 measured that separately; Day 12 only adds a rendering at n=33.
+- Not a decision about how to render the COLMAP fused point cloud against held-out cameras. `modal_app.py` has no existing function for this. Task #3 picks between (a) dedicated rendering function or (b) `train_gsplat` with `n_iterations=0` + `dense_init_ply_path=<fused.ply>` as a 0-iter initialization-only pass. This entry notes the choice as a prerequisite but does not commit to either option.
+
+**Pre-committed scenario coverage (per DECISIONS 27's scenario-coverage discipline).**
+
+The expected ordering is PSNR: frozen > over-dens > COLMAP MVS; SSIM: over-dens > frozen ≈ MVS; LPIPS: over-dens < frozen ≈ MVS (lower is better). For each major alternative ordering, the writeup framing is pre-committed:
+
+- **S_X1 (expected):** frozen PSNR-best, over-dens PSNR-worse than frozen but perceptual-best, MVS PSNR-worst. Writeup = "three distinct failure modes (under-fit, over-fit pixel noise, missing geometry), none dominant, the comparison is an exposition of how each method breaks outside calibration."
+- **S_X2:** COLMAP MVS PSNR close to over-dens on some views (views inside training-camera coverage). Writeup = "MVS at n=33 competitive with neural splatting on well-covered views; three-regime framing holds." Not a falsification.
+- **S_X3:** COLMAP MVS PSNR > frozen PSNR on median. Orthogonal to the V1.5 headline. The headline concerns densification behavior within 3DGS ("frozen baseline beats working densification on PSNR in the ~33-view, ~9k-init regime," per the post-Day-9 plan; narrowed at Day 11 to "frozen advantage narrows but survives at 257k"), not cross-method comparison. A MVS-beats-frozen result at n=33 is within expected range given COLMAP renders from a dense ~257k-point reconstruction while 3DGS renders from a fixed-capacity splatting of 9k points, and the cross-method table is framed as a supporting finding in the post-Day-9 plan, not the lead claim. Writeup = "COLMAP MVS at dense reconstruction beats frozen 3DGS at under-init on PSNR at n=33; orthogonal to the densification-ablation headline." The three-regime frame survives unchanged. This S_X3 framing pre-commits that the headline scope precludes method comparison from falsifying it — a tighter contract than the alternative "headline weakens to within-splatting" would have been.
+- **S_X4:** over-dens PSNR > frozen PSNR. Contradicts Day 9 + Day 10 + Day 11 chain. Low prior. Stop and investigate root cause — do NOT write up until the cause is identified.
+- **S_X5:** all three methods within 1 dB of each other on median PSNR. The three distinct failure modes converge numerically at this scene. Enriches the frame without falsifying it: add a sentence about how distinct mechanisms can produce similar PSNR magnitudes by coincidence.
+- **S_X6:** perceptual-metric ordering flips (e.g., frozen beats over-dens on SSIM/LPIPS). Would contradict Day 9's PSNR-LPIPS-SSIM asymmetry finding. Plausible if a fresh re-run diverges from Day 10; reconcile before writeup.
+
+**Hard stops for Day 12 compute (task #3).**
+
+- [ ] COLMAP MVS rendered PSNR outside [10, 22] dB — below 10 suggests pipeline bug; above 22 exceeds the frozen 9k anchor and needs per-view investigation.
+- [ ] Frozen 3DGS re-run (if fresh) differs from Day 10 anchor (22.56 dB) by > 0.5 dB — suggests container or code drift since Day 10.
+- [ ] Over-dens 3DGS re-run (if fresh) differs from Day 10 anchor (18.90 dB) by > 0.5 dB — same reason.
+- [ ] Any method produces nan/inf or PSNR < 5 dB or > 30 dB — suspicious; scan9 + n=33 is a hard regime, nothing should land near published DTU SOTA.
+- [ ] COLMAP MVS rendered point count on held-out views is < 10k or > 500k — sanity check on the rendering implementation, not the MVS method itself.
+
+**Connection to Day 11's pre-commit chain and the five-gap taxonomy.**
+
+This entry applies the discipline from DECISIONS 26 (pre-committed writeup templates), DECISIONS 27 (scenario-coverage enumeration), and DECISIONS 28 (structural-vs-content framing) to Day 12's cross-method framing:
+
+- The three-regime frame is a *structural* framing (which cells the table has, which mechanisms each cell invokes), not a content claim about specific numeric values. Safe to pre-commit.
+- Scenario coverage (S_X1 through S_X6) enumerates outcome clusters with their writeup implications, rather than pre-committing a specific cluster.
+- The hard stops are trigger thresholds, not target numerics, per DECISIONS 25's quantitative-gap catch mechanism.
+
+The Day 12 cross-method comparison introduces inter-method framing on top of everything Day 11 had. Per DECISIONS 28's observation about the taxonomy's growth rate ("Day 12 may surface another 1–2 failure modes"), the posture is: expect new failure modes, catch them in observation-time review, catalogue them as they appear. Nothing here pre-commits a sixth taxonomy entry — candidate 6th entries stay in procedural notes until recurrence-with-damage supplies independent motivating power.
+
+**Honest scope of this decision.**
+
+- This entry pre-commits the three-regime interpretive frame for Day 12's cross-method table writeup. It does not commit to specific numeric values, rendering-function choices, or compute schedules; those are task #3 concerns with their own preflight.
+- The Day 11 provenance sentence (paragraph 3 above) is load-bearing: it documents that Day 11's dense-init bounding experiment is what upgraded the frame from {classical, neural} to {classical, frozen, over-dens}. Future-reader reading the commit chain should see that Day 11 was not just a headline-bounding run; it was a framing-enrichment run whose contribution to Day 12's interpretation is the mechanism split, not the dB numbers.
+- The writeup template in S_X1 is the expected path. If any of S_X2 through S_X6 fires, the writeup adapts per that scenario's pre-committed framing; no observation-time re-interpretation.
+- The three-regime frame is not a permanent claim about the methods' relative quality. It is scoped to scan9 + n=33 + the specific calibration-context arguments made above. Extension to other scenes, view counts, or init densities is out of scope.
