@@ -397,20 +397,183 @@ init density per se.
   band trip (1.55M vs pre-committed [800k, 1300k]) non-pathologically; see
   DECISIONS.md entry 27 for the override rationale.
 
-**Cross-method comparison vs V1's COLMAP** is the Day 12 work. The same 4
-held-out cameras the gsplat runs are scored against will be used to render
-V1's best COLMAP fused point cloud, and both will be scored on the same metrics
-against the same ground-truth frames. Day 11's dense-init bounding experiment
-strengthens the Day 9 framing: V1.5's gsplat PSNR underperformance at sparse
-init is not an artifact of the sparse-init choice — dense init does not rescue
-either recipe, and frozen remains the PSNR-best V1.5 configuration at both 9k
-and 257k init densities. The Day 12 framing will NOT be "neural splatting
-beats classical MVS on novel-view synthesis." It will be "at this scene +
-view-count combination, neither method is in its happy regime, and the failure
-modes are different — classical dense MVS loses geometry; neural splatting
-either over-parameterizes (hurting PSNR while preserving perceptual metrics
-at frozen, hurting all metrics at over-dens) or under-fits (hurting all
-metrics) across tested init densities."
+### Day 12 — Cross-method comparison at scan9
+
+Day 11 bounds the within-3DGS regime-dependence question. Day 12 asks a
+different question: how do COLMAP dense MVS and gsplat 3DGS compare when
+both are run at the same scene (DTU scan9) under V1.5's constraints — 33
+training views for 3DGS, 37 undistorted images for MVS PatchMatch, 4
+held-out novel views for evaluation?
+
+The framing is the three-regime frame pre-committed in
+[DECISIONS.md](DECISIONS.md) entry 29 (with Amendments 1 and 2 for the
+factual `n=37` correction and the rendering-function decision). Each
+method runs at a scene + view-count combination that is outside its own
+calibration zone:
+
+- **COLMAP MVS at n=37** undistorted views is above V1's n=30 stress point
+  (DECISIONS 16, ~100× point-count variance) but below DTU's full
+  protocol at n=49. Seven views above the stress cliff, 12 views below
+  the comfort zone.
+- **Frozen 3DGS at 9,044 SfM points** is ~15× sparser than gsplat's
+  calibrated regime (~100k-200k points per DECISIONS 21's mechanism
+  finding).
+- **Over-dens 3DGS at 9,044 SfM points** is miscalibrated at the recipe
+  level — the default gradient threshold fires on 82% of Gaussians per
+  event vs the calibrated 5–15% (DECISIONS 21 mechanism).
+
+**Rendering-function decision.** The cross-method table reports each
+method on the metrics its output naturally supports, with dashes in
+non-applicable cells — the "don't force apples-to-apples where none
+exists" framing. COLMAP MVS produces a fused point cloud → geometric
+metrics against the DTU ground-truth mesh (chamfer, accuracy,
+completeness, F-score at distance thresholds). 3DGS produces a radiance
+field → novel-view synthesis metrics against held-out images
+(PSNR, SSIM, LPIPS). The alternative of writing a dedicated renderer
+for COLMAP points was considered and rejected because the renderer
+choice introduces a pipeline confound into the method comparison. See
+DECISIONS 29 Amendment 2 for the full rationale.
+
+**Results.**
+
+| Method | N | PSNR (dB) | SSIM | LPIPS | Chamfer (mm) | F@1mm | F@5mm | F@10mm |
+|---|---|---|---|---|---|---|---|---|
+| COLMAP MVS (n=37, seed=123 SfM) | 257,691 | — | — | — | 7.35 | 0.236 | 0.742 | 0.831 |
+| Frozen 3DGS (9k init, 33 train) | 9,044 | 21.32 ± 1.53 | 0.813 | 0.194 | — | — | — | — |
+| Over-dens 3DGS (9k init, 33 train) | 1.11M ± 36k | 18.50 ± 3.20 | 0.884 | 0.087 | — | — | — | — |
+
+*3DGS cells report 3-seed median ± range across seeds {42, 123, 7} per
+V1.5's multi-seed discipline. "Range" is max − min across the 3 seeds,
+not standard deviation. Day 11 regime-effect isolation used
+matched-seed-42 values (frozen 22.56 dB, over-dens 18.90 dB) for
+single-variable discipline; those values are not the appropriate
+cross-method comparison basis. The MVS cell reports a single run;
+Day 11 measured source-(d) PatchMatch CUDA-thread stochasticity at
+0.10 dB on downstream 3DGS PSNR, but geometric-metric-level variance
+for the MVS cell is uncharacterized, and a 2-run sample would overclaim
+precision relative to the 3DGS row's 3-seed distribution.*
+
+**Finding 1 — Day 11's MVS reconstruction is 2.6× tighter than V1's
+seed=42 baseline, confounded by SfM seed.** V1's own scan9 baseline
+(`results/baseline_scan9/result.json`, run at seed=42) produces 72,122
+fused points and chamfer 18.89 mm. Day 11's `rerun_dense_mvs` on the V1
+best sparse model (`scan9_v49_s123_3d428b`, seed=123 SfM) produces
+257,691 fused points and chamfer 7.35 mm. The 2.6× chamfer improvement
+and 3.6× point-density increase are SfM-seed-driven: both runs use the
+same dense MVS stage with identical settings (num_iterations=5,
+photo+geom filter, min_num_pixels=3), and the difference is upstream
+in SfM-level reconstruction quality at seed=42 vs seed=123. This is not
+a view-count-sensitivity result — the MVS PatchMatch stage runs on the
+same 37 undistorted images in both cases (verified via
+`modal volume ls` and `patch-match.cfg`; see DECISIONS 26 Amendment 2
+for the n=33 → n=37 factual correction).
+
+The S_X3 scenario template pre-committed in DECISIONS 29 Amendment 2
+directly applies: *"Day 11's seed=123 SfM produces a tighter dense
+reconstruction than V1's seed=42 baseline at the same nominal n=49
+subsample; consistent with SfM-seed variance as a reconstruction-quality
+source."*
+
+*Gate-trip + diagnostic transparency.* The observed `F@5mm = 0.742`
+landed outside the DECISIONS 29 Amendment 2 committed S_X5 hard-stop
+band `[0.10, 0.50]`, and `chamfer = 7.35 mm` landed inside the pre-report
+diagnostic envelope `[5, 10]` mm. Per the gate discipline, we halted
+before reporting and re-ran the eval pipeline on V1's own
+`results/baseline_scan9/dense.ply` to verify reproduction of V1's 18.89
+mm anchor. Result: bit-tight reproduction at ≤0.01% relative error across
+all seven metrics (chamfer 18.8913 vs 18.89, F@1mm 0.0445 vs 0.0445,
+icp_fitness 0.7052 vs 0.7052). The gate trip is resolved as a legitimate
+S_X3 observation, not a pipeline artifact. Diagnostic artifacts at
+`preflight/day12_mvs_eval/day12_diagnostic_result.json` (preflight/ is
+gitignored scratch).
+
+**Finding 2 — V1's scan9 chamfer baseline is SfM-seed-sensitive.**
+V1's 18.89 mm anchor at seed=42 was implicitly treated as "the" scan9
+MVS baseline across all prior V1 → V1.5 writing. The diagnostic rerun
+confirms V1's eval pipeline is stable (the 18.89 number reproduces
+exactly), but a different SfM seed against the same scene produces a
+2.6× better chamfer. This constrains future V1-pipeline comparisons:
+any cross-method or cross-regime comparison that uses V1's chamfer
+anchor should account for SfM-seed-level variance, which at scan9 is
+large enough (>10 mm on chamfer in the V1 eval scale) to dominate
+view-count or method-level effects. Characterizing SfM-seed variance
+as its own axis (multi-seed V1 reconstructions, chamfer distribution)
+is out of V1.5 scope; recorded here as a methodology finding.
+
+**Finding 3 — 3DGS rows reuse Day 10 multi-seed anchors.** The Day 12
+table is a cross-method assembly, not a fresh 3DGS experiment. The
+3DGS rows are the Day 10 post-fix multi-seed numbers (gsplat 1.5.3,
+packed=True, `grow_grad2d=2e-4` default, `random_bkgd=False`, seeds
+{42, 123, 7}). Compared to the matched-seed-42 anchors used for Day 11's
+regime isolation: frozen 21.32 dB median vs 22.56 dB at seed=42, and
+over-dens 18.50 dB median vs 18.90 dB at seed=42. Seed 42 is a
+high-tail draw in both recipes — 1.24 dB above median for frozen and
+0.40 dB above median for over-dens. The matched-seed-42 values are
+valid regime-isolation anchors for Day 11 but overstate the method-level
+PSNR for cross-method reporting.
+
+**Three-regime narrative.** Each method fails at scan9 + this regime
+in a distinct way:
+
+- **COLMAP MVS at n=37 × seed=123 SfM**: V1-pipeline chamfer 7.35 mm,
+  F@5mm 0.742. The method produces a competent reconstruction on V1's
+  internal eval scale — which is itself 10× looser than DTU benchmark
+  SOTA because the pipeline uses Open3D ICP alignment rather than the
+  DTU official mask-aware Matlab evaluator (see Honest Scope below).
+  The interesting observation is not that MVS "beats" anything — the
+  cross-method framing precludes that — but that the MVS reconstruction
+  quality at this scene is dominated by an unexpected source: SfM-seed
+  variance at the sparse-model level. What prior V1 → V1.5 writing
+  read as "scan9 + V1 pipeline = chamfer ~18 mm" is actually
+  "scan9 + V1 pipeline + seed=42 = 18 mm; seed=123 = 7 mm."
+
+- **Frozen 3DGS at 9k init**: multi-seed PSNR 21.32 ± 1.53 dB,
+  capacity-fixed at N=9,044. The model under-fits because 9k Gaussians
+  cannot represent scan9's sub-pixel detail (DECISIONS 21). The failure
+  mode is capacity, not optimizer or data. At dense init (Day 11),
+  frozen's seed=42 PSNR drops to 18.51 dB — the capacity model's
+  best-fit approximation of scan9 at N=257k is worse than at N=9k
+  because the optimizer fights a larger, noisier set of fixed Gaussian
+  centers. Frozen at 9k remains the PSNR-best V1.5 configuration across
+  tested init densities.
+
+- **Over-dens 3DGS at 9k init**: multi-seed PSNR 18.50 ± 3.20 dB,
+  grows to ~1.1M Gaussians. The default `grow_grad2d=2e-4` threshold
+  is miscalibrated for this init density (DECISIONS 21 mechanism:
+  threshold fires on 82% of Gaussians per event vs the calibrated
+  5–15%). Over-parameterization produces per-pixel rendering noise
+  that hurts PSNR but preserves perceptual metrics (SSIM 0.884 vs
+  frozen's 0.813; LPIPS 0.087 vs frozen's 0.194). At dense init,
+  the recipe gets worse on all three metrics (Day 11 Finding 3),
+  confirming the miscalibration is at the recipe level, not the
+  init-density level.
+
+The cross-method comparison is the three-regime mechanism taxonomy,
+not a single-metric horse race: missing geometry (MVS's SfM-seed
+fragility at the V1 eval scale), under-fit (frozen capacity limit),
+and over-fit pixel noise (over-dens recipe miscalibration). Each
+failure mode is traceable to a mechanism documented in prior DECISIONS
+entries, and none are resolved by more init density or more views at
+this scene + V1-pipeline regime.
+
+**What Day 12 does NOT claim.**
+
+- Not "neural splatting beats classical MVS on DTU scan9 at novel-view
+  PSNR." No such comparison is made — MVS has no PSNR column and 3DGS
+  has no chamfer column under the option (c) rendering decision.
+- Not "COLMAP MVS at n=37 is competitive with DTU SOTA." V1's internal
+  eval pipeline is benchmark-loose by an order of magnitude; Day 11's
+  7.35 mm chamfer would remain ~10× SOTA under the DTU official
+  mask-aware evaluator.
+- Not "SfM-seed variance is a method-level finding about COLMAP."
+  The finding is about V1's internal eval pipeline's sensitivity to
+  upstream SfM input quality; it would apply to any method consuming
+  an SfM sparse model as input.
+- Not a V1.5 headline shift. The V1.5 headline remains within-3DGS
+  densification (DECISIONS 21, narrowed at Day 11 to "frozen advantage
+  narrows but survives at 257k"). Cross-method results are supporting
+  findings per DECISIONS 29 Amendment 2's S_X3 pre-commit framing — the
+  headline scope precludes method comparison from falsifying it.
 
 ## C++ Calibration Module
 
