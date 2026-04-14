@@ -833,6 +833,89 @@ def rerun_dense_mvs(
         }
 
 
+@app.function(
+    image=colmap_image,
+    timeout=60,
+    volumes={VOLUME_MOUNT: workspace_volume},
+)
+def inspect_workspace_tree(colmap_run_id: str) -> dict:
+    """Diagnostic: structured tree of /workspace/{colmap_run_id}/dense/ for
+    understanding pycolmap's workspace layout post-undistort.
+
+    Read-only — does not modify any workspace state. Used to discover what
+    files and directories pycolmap.undistort_images produces, so that
+    rerun_dense_mvs can mirror the structure into a fresh workspace without
+    enumerating requirements from memory (which is the retrieval-gap pattern
+    DECISIONS 26 names; cf. Day 11's Smoke A iteration history).
+
+    Returns three levels: dense/ top-level, dense/<subdir>/ for each top-level
+    subdirectory, and dense/<subdir>/<subsubdir>/ for each second-level
+    subdirectory. Files at each level are listed with byte sizes; the first 10
+    files per directory are returned verbatim, with `n_files` reporting the
+    full count and `total_size_bytes` reporting the cumulative byte count for
+    that directory's files (useful for cost-estimating a wholesale copy).
+
+    Returns:
+        dict with success, levels (a dict mapping path → {dirs, n_files,
+        files_first_10, total_size_bytes}), elapsed_seconds, and error.
+    """
+    import os
+    import time
+
+    start = time.time()
+    base = f"{VOLUME_MOUNT}/{colmap_run_id}"
+    dense = f"{base}/dense"
+
+    if not os.path.isdir(dense):
+        return {
+            "success": False,
+            "levels": {},
+            "elapsed_seconds": time.time() - start,
+            "error": f"no dense directory at {dense}",
+        }
+
+    def listdir_summary(path: str, max_files: int = 10) -> dict:
+        try:
+            entries = sorted(os.listdir(path))
+        except OSError as e:
+            return {"error": f"listdir failed: {e}"}
+        dirs = []
+        files = []
+        for e in entries:
+            full = os.path.join(path, e)
+            if os.path.isdir(full):
+                dirs.append(e)
+            elif os.path.isfile(full):
+                try:
+                    size = os.path.getsize(full)
+                except OSError:
+                    size = -1
+                files.append((e, size))
+        return {
+            "dirs": dirs,
+            "n_files": len(files),
+            "files_first_10": files[:max_files],
+            "total_size_bytes": sum(s for _, s in files if s > 0),
+        }
+
+    levels: dict = {}
+    levels["dense/"] = listdir_summary(dense)
+    for top_subdir in levels["dense/"].get("dirs", []):
+        sub_path = f"{dense}/{top_subdir}"
+        sub_key = f"dense/{top_subdir}/"
+        levels[sub_key] = listdir_summary(sub_path)
+        for sub_sub in levels[sub_key].get("dirs", []):
+            sub_sub_path = f"{sub_path}/{sub_sub}"
+            levels[f"dense/{top_subdir}/{sub_sub}/"] = listdir_summary(sub_sub_path)
+
+    return {
+        "success": True,
+        "levels": levels,
+        "elapsed_seconds": time.time() - start,
+        "error": None,
+    }
+
+
 # ---- DTU data download (runs on Modal, fast datacenter internet) ----
 
 download_image = (
