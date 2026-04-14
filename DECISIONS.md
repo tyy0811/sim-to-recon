@@ -733,6 +733,28 @@ DECISIONS 20 named the wrong variance sources (structural gap). DECISIONS 23 anc
 - Source (d) verification covers COLMAP dense-MVS *PSNR-impact magnitude at n=33* only. It does not cover whether the specific COLMAP threshold settings produce any particular point count — n_points is observed, not pre-committed (see scope correction in the "What this is NOT" section above).
 - This decision does not pre-commit what happens if `rerun_dense_mvs` cannot reliably produce a usable dense init (PatchMatch crashes mid-run, fusion produces fewer than ~1000 points, or both verification runs degenerate to near-empty outputs). The fallback per the post-Day-9 plan's spirit: document the attempt in the preflight + writeup, ship Day 9 headline with explicit "dense-init bounding not achieved, framework preserved for future work" caveat. That's a Day 11 execution contingency, not a DECISIONS 26 contingency.
 
+**Amendment 2 (2026-04-14, pre-Day-12-compute): Factual correction — MVS PatchMatch view count is n=37, not n=33.**
+
+This entry's source (d) discussion (lines 616, 633, 732, 733) describes the Day 11 MVS view count as n=33. Verification via `modal volume ls simtorecon-workspace scan9_v49_s123_3d428b/dense/images` (37 .png files) and inspection of `scan9_v49_s123_3d428b/dense/stereo/patch-match.cfg` (74 lines = 37 entries, each two lines) confirms that Day 11's `rerun_dense_mvs` runs PatchMatch on **37** undistorted views, not 33.
+
+**Root cause.** The "n=33" number was reasoned from memory as the 3DGS train view count and conflated with the MVS PatchMatch view count. The 3DGS side is correctly at 33 train / 4 test views (`test_every=10` on 37 → 33 train + 4 test, confirmed in the Day 12 Y-refinement probe stdout: `[train_gsplat] split: 33 train / 4 test`). The MVS side is at 37 — PatchMatch and fusion use all 37 undistorted images from the cached `scan9_v49_s123_3d428b` sparse model.
+
+**Updated positioning.** PatchMatch at n=37 is **seven** views above V1's n=30 stress point (not three), and 12 views below DTU's full protocol at n=49. The qualitative argument — "above V1's stress regime, below DTU's full-protocol comfort zone" — survives unchanged; the numeric margin above the stress point shifts from 3 to 7.
+
+**Methodology impact: zero.** Day 11's source (d) verification measured 0.10 dB PSNR variance between two PatchMatch+fusion runs at seed=42. That measurement was made at n=37 — what was observed is what was observed; only the label on *what* was observed is incorrect. The 0.5 dB gate did not fire at 0.10 dB, and would not fire at any relabeling of the view count. All Day 11 escalation decisions, the frozen-decisive outcome, the over-dens 3-seed escalation, and DECISIONS 27's N_final override hold unchanged.
+
+**Where this affects downstream entries.** DECISIONS 29's Day 12 three-regime pre-commit inherited the "n=33" label for the COLMAP MVS cell. A corresponding Amendment 1 lands in DECISIONS 29 in the same commit as this amendment, correcting the label there as well.
+
+**Retrieval-gap recurrence note.** This is the third instance of the retrieval-gap failure mode cataloged in this entry's "self-catch during consolidation" addendum (the third pre-commit failure mode per DECISIONS 25's taxonomy). Previous instances:
+
+1. The source (d) determinism prior (Day 11 authoring time, caught during consolidation drafting — see the addendum above).
+2. The workspace-contract scaffolding case (Day 11 Smoke A iterations — the earlier enumerate-from-memory strategy for mirroring the cached `dense/` tree missed layers that pycolmap's workspace contract required; fixed by adopting the walk-and-copy approach documented inline in `rerun_dense_mvs`).
+3. This MVS view count labeling error.
+
+All three share the same mechanism: an author reasons from memory about a concrete repo fact when a `grep`/`ls`/`read` would resolve it at lower cost and higher reliability. The catch mechanism — forcing memory into concrete commands — is the existing rule; the recurrences strengthen the existing taxonomy slot rather than requiring a new artifact. The three-instance robustness observation is a Day 13 README methodology subsection item, not a new DECISIONS entry.
+
+This amendment does NOT change: methodology, escalation thresholds, the 0.5 dB source (d) gate, writeup templates, or any compute decision. It changes only the numeric label on the MVS view count.
+
 ## 27. Day 11 Step 9 N_final band override — documented, not retroactively rewritten
 
 **Event (2026-04-14).** Step 9 (over-dens × seed=42 × init A, 7000 iters, dense init at N=257,687) ran successfully to completion and produced an over-dens PSNR median of 15.354 dB. All pre-committed Phase 2 acceptance bands cleared EXCEPT N_final: the observed value 1,545,441 fell outside the pre-committed band [800,000, 1,300,000] by +19% above the upper bound. Preflight Section 5 Phase 2 language was ambiguous about whether band trip constitutes "failure" halting escalation, so the execution halted at Step 9 and reported to the user for direction.
@@ -957,3 +979,21 @@ The Day 12 cross-method comparison introduces inter-method framing on top of eve
 - The Day 11 provenance sentence (paragraph 3 above) is load-bearing: it documents that Day 11's dense-init bounding experiment is what upgraded the frame from {classical, neural} to {classical, frozen, over-dens}. Future-reader reading the commit chain should see that Day 11 was not just a headline-bounding run; it was a framing-enrichment run whose contribution to Day 12's interpretation is the mechanism split, not the dB numbers.
 - The writeup template in S_X1 is the expected path. If any of S_X2 through S_X6 fires, the writeup adapts per that scenario's pre-committed framing; no observation-time re-interpretation.
 - The three-regime frame is not a permanent claim about the methods' relative quality. It is scoped to scan9 + n=33 + the specific calibration-context arguments made above. Extension to other scenes, view counts, or init densities is out of scope.
+
+**Amendment 1 (same-day, 2026-04-14, pre-task-#3-compute): Factual correction — MVS view count label is n=37, not n=33.**
+
+The "n=33" label for the COLMAP MVS cell throughout this entry is incorrect. Day 11's `rerun_dense_mvs` runs PatchMatch on **37** undistorted views from `scan9_v49_s123_3d428b/dense/images/`, verified via `modal volume ls` (37 .png files) and `patch-match.cfg` (37 entries). The label error was inherited from DECISIONS 26 (see that entry's Amendment 2 for the same correction and the full root-cause analysis).
+
+**Corrected labels in this entry.** For the COLMAP MVS row of the three-regime table:
+
+- Row label: "COLMAP MVS at n=37" (not n=33).
+- Calibration context: Day 11 measured n=37 source-(d) variance at 0.10 dB (not n=33).
+- Off-calibration positioning: "Above V1's stress regime (n=37 > n=30 > n=15), below DTU's full-protocol comfort zone (n=37 < n=49)" — seven views above the stress point, 12 views below full protocol.
+
+**3DGS row labels are correct and unchanged.** Frozen and over-dens rows run at 9k init on 33 train / 4 test views (`test_every=10` on 37 → 33 train + 4 test). The "n=33" references in the 3DGS rows of the three-regime table, in scenarios S_X1 through S_X6, and in the hard stops section correctly describe the 3DGS training view count.
+
+**Ambiguous "scan9 + n=33" references.** In the opening Decision paragraph and the Honest Scope section, "n=33" was used to denote the scene+regime as shorthand. The accurate regime is "scan9 at 37 undistorted views (MVS) / 33 3DGS train views + 4 test views." The shorthand "scan9 at the V1.5 regime" is acceptable colloquial framing for the opening paragraph; future writeups should avoid "n=33" as a regime-level label because it conflates the 3DGS train count with the MVS view count.
+
+**Methodology impact: zero.** The three-regime frame's qualitative positioning ("above V1 stress point, below DTU full protocol") survives unchanged for the MVS cell. Scenario coverage S_X1–S_X6, hard stops, and the honest-scope section all hold as methodology contract. Only the numeric label on the MVS view count is corrected.
+
+**Connection to the retrieval-gap taxonomy slot.** Third instance of the retrieval-gap failure mode in the V1.5 chain (see DECISIONS 26 Amendment 2 for the full recurrence note). The catch mechanism — forcing memory into concrete commands — applies: one `modal volume ls` at DECISIONS 29 commit time would have caught this before the pre-commit landed in git. The correction lands before Day 12 compute to preserve the pre-commit → observation comparison honesty, matching the Day 11 Amendment 1 pattern for DECISIONS 26.
